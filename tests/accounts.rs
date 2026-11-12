@@ -222,6 +222,117 @@ fn older_oauth_completion_cannot_overwrite_newer_login_or_resurrect_removal() {
 }
 
 #[test]
+fn relogin_removes_superseded_files_without_invalidating_in_memory_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let account = store.login("old", credential("a", "w")).unwrap();
+    let old = store.lease(&account.id).unwrap();
+    let obsolete = dir
+        .path()
+        .join("credentials")
+        .join(format!("{}-{}.json", account.id, account.generation));
+    let mut replacement = credential("a", "w");
+    replacement.access_token = "new-access".into();
+    let current = store.login("new", replacement).unwrap();
+    assert!(
+        !obsolete.exists(),
+        "old plaintext credentials must be removed"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("credentials"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert_eq!(old.credential.access_token, "access-a");
+    assert_eq!(
+        store.lease(&current.id).unwrap().credential.access_token,
+        "new-access"
+    );
+}
+
+#[test]
+fn published_login_survives_cleanup_failure_and_next_login_retries_maintenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let account = store.login("old", credential("a", "w")).unwrap();
+    let blocker = dir
+        .path()
+        .join("credentials")
+        .join(format!("{}-obsolete.json", account.id));
+    std::fs::create_dir(&blocker).unwrap();
+    let published = store.login("published", credential("a", "w")).unwrap();
+    assert_eq!(
+        store.lease(&account.id).unwrap().account.generation,
+        published.generation
+    );
+    std::fs::remove_dir(blocker).unwrap();
+    store
+        .login("maintenance retry", credential("a", "w"))
+        .unwrap();
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("credentials"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn generation_snapshot_distinguishes_mutation_from_corrupt_or_missing_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let selected = store.login("selected", credential("a", "w")).unwrap();
+    let current = store.login("current", credential("a", "w")).unwrap();
+    assert!(
+        store
+            .lease_for_generation(&selected.id, &selected.generation)
+            .unwrap()
+            .is_none()
+    );
+    let path = dir
+        .path()
+        .join("credentials")
+        .join(format!("{}-{}.json", current.id, current.generation));
+    std::fs::write(&path, b"invalid json").unwrap();
+    assert!(
+        store
+            .lease_for_generation(&current.id, &current.generation)
+            .is_err()
+    );
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        store
+            .lease_for_generation(&current.id, &current.generation)
+            .is_err()
+    );
+    store.remove(&current.id).unwrap();
+    assert!(
+        store
+            .lease_for_generation(&current.id, &current.generation)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn malformed_registry_generation_remains_a_storage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let selected = store.login("a", credential("a", "w")).unwrap();
+    let path = dir.path().join("accounts.json");
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    registry["accounts"][0]["generation"] = serde_json::json!("invalid generation");
+    std::fs::write(path, serde_json::to_vec(&registry).unwrap()).unwrap();
+    assert!(
+        store
+            .lease_for_generation(&selected.id, &selected.generation)
+            .is_err()
+    );
+}
+
+#[test]
 fn concurrent_quota_reports_preserve_longest_reset_and_revocation() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();

@@ -73,6 +73,45 @@ fn upstream_validation_failures_have_safe_diagnostics_instead_of_a_generic_400()
 }
 
 #[test]
+fn quota_type_survives_null_empty_and_malformed_error_codes() {
+    let headers = axum::http::HeaderMap::new();
+    for code in [
+        json!(null),
+        json!(""),
+        json!(false),
+        json!(42),
+        json!({"bad":"code"}),
+    ] {
+        for (kind, quota) in [
+            ("usage_limit_reached", true),
+            ("rate_limit_exceeded", false),
+            ("invalid_request_error", false),
+        ] {
+            let body = json!({"error":{"code":code,"type":kind}});
+            assert_eq!(
+                classify(429, &body, &headers, 100).unwrap().is_quota(),
+                quota
+            );
+            let event = json!({"type":"response.failed","response":body});
+            assert_eq!(
+                classify(200, &event, &headers, 100).unwrap().is_quota(),
+                quota
+            );
+        }
+    }
+    assert!(
+        !classify(
+            429,
+            &json!({"error":{"code":"rate_limit_exceeded","type":"usage_limit_reached"}}),
+            &headers,
+            100
+        )
+        .unwrap()
+        .is_quota()
+    );
+}
+
+#[test]
 fn unrecognized_upstream_diagnostics_never_retain_echoed_values() {
     let error = classify(400, &json!({"error":{"code":"SECRET_TOKEN_CODE","param":"SECRET_PROMPT_PARAMETER","message":"SECRET_REASONING_BODY"}}), &axum::http::HeaderMap::new(), 100).unwrap();
     assert_eq!(error.code, "upstream_invalid_request");

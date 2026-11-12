@@ -1,0 +1,23 @@
+services:
+  proxy:
+    build: .
+    image: llm-proxy:local
+    command:
+      - serve
+      - --listen-address
+      - 0.0.0.0
+      - --listen-port
+      - "18765"
+      - --default-model
+      - "${LLM_PROXY_MODEL:-gpt-6.1-sol}"
+    ports:
+      - "127.0.0.1:${LLM_PROXY_PORT:-18765}:18765"
+    volumes:
+      # Keep copy-up enabled: the image prepares a private, non-root state/ child.
+      - state:/var/lib/llm-proxy
+    stop_signal: SIGINT
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+volumes:
+  state:

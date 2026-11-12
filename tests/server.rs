@@ -80,6 +80,142 @@ fn req(stream: bool) -> Request<Body> {
 async fn response_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
+fn admission_app() -> (tempfile::TempDir, axum::Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let account = store.login("synthetic", credential("synthetic")).unwrap();
+    let mut providers = ProviderRegistry::default();
+    providers.register(Arc::new(Fake {
+        events: HashMap::from([(account.id, success())]),
+        calls: Arc::new(Mutex::new(vec![])),
+    }));
+    let app = router(AppState::new(
+        store,
+        Config {
+            default_model: Some("gpt-5.5".into()),
+            ..Default::default()
+        },
+        providers,
+    ));
+    (dir, app)
+}
+
+#[tokio::test]
+async fn saturated_admission_rejects_generation_and_token_count_without_reading_body() {
+    let (_dir, app) = admission_app();
+    let mut active = vec![];
+    for _ in 0..32 {
+        let response = app.clone().oneshot(req(true)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        active.push(response);
+    }
+    for route in ["/v1/messages", "/v1/messages/count_tokens"] {
+        let polled = Arc::new(AtomicBool::new(false));
+        let probe = polled.clone();
+        let mut bytes = Some(axum::body::Bytes::from_static(
+            b"{\"model\":\"sonnet\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
+        ));
+        let body = Body::from_stream(futures_util::stream::poll_fn(move |_| {
+            probe.store(true, Ordering::SeqCst);
+            std::task::Poll::Ready(bytes.take().map(Ok::<_, std::convert::Infallible>))
+        }));
+        let request = Request::post(route)
+            .header("content-type", "application/json")
+            .body(body)
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{route}"
+        );
+        assert!(response.headers().contains_key("x-request-id"));
+        assert!(
+            !polled.load(Ordering::SeqCst),
+            "overload read body for {route}"
+        );
+    }
+    drop(active);
+    assert_eq!(
+        app.oneshot(req(false)).await.unwrap().status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn buffered_bodies_retain_admission_and_invalid_json_returns_capacity() {
+    let (_dir, app) = admission_app();
+    for _ in 0..40 {
+        let request = Request::post("/v1/messages")
+            .header("content-type", "application/json")
+            .body(Body::from("not json"))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let mut buffered = vec![];
+    for _ in 0..32 {
+        let response = app.clone().oneshot(req(false)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        buffered.push(response);
+    }
+    assert_eq!(
+        app.clone().oneshot(req(false)).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    drop(buffered);
+    assert_eq!(
+        app.oneshot(req(false)).await.unwrap().status(),
+        StatusCode::OK
+    );
+}
+
+#[test]
+fn cancelled_token_count_keeps_admission_until_blocking_job_finishes() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (_dir, app) = admission_app();
+        let mut active = vec![];
+        for _ in 0..31 {
+            active.push(app.clone().oneshot(req(true)).await.unwrap());
+        }
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        started_rx.await.unwrap();
+        let mut token_request = req(false);
+        *token_request.uri_mut() = "/v1/messages/count_tokens".parse().unwrap();
+        let mut pending = Box::pin(app.clone().oneshot(token_request));
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        drop(pending);
+        let mut another = req(false);
+        *another.uri_mut() = "/v1/messages/count_tokens".parse().unwrap();
+        // Do not assert until releasing the blocking pool, even on failure.
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            app.clone().oneshot(another),
+        )
+        .await;
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap();
+        drop(active);
+        assert_eq!(
+            response.unwrap().unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    });
+}
+
 #[tokio::test]
 async fn hard_quota_switches_but_generic_429_does_not() {
     let dir = tempfile::tempdir().unwrap();

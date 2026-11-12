@@ -3,6 +3,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
 };
 
@@ -31,6 +32,7 @@ pub struct Config {
     pub default_provider: String,
     pub aliases: BTreeMap<String, String>,
     pub models: BTreeMap<String, ModelPolicy>,
+    pub listen_address: IpAddr,
     #[serde(alias = "port")]
     pub listen_port: u16,
     pub codex_endpoint: String,
@@ -43,6 +45,7 @@ impl Default for Config {
             default_provider: "codex".into(),
             aliases: BTreeMap::new(),
             models: BTreeMap::new(),
+            listen_address: Ipv4Addr::LOCALHOST.into(),
             listen_port: 18765,
             codex_endpoint: CODEX_ENDPOINT.into(),
             log_level: "info".into(),
@@ -196,5 +199,18 @@ mod tests {
         let c: Config = toml::from_str("default_model = 'custom-codex'\n[models.custom-codex]\nresponses_lite = false\n[aliases]\nsmall = 'custom-codex'\n").unwrap();
         assert_eq!(c.resolve("small").unwrap().id, "custom-codex");
         assert!(!c.resolve("custom-codex").unwrap().responses_lite);
+    }
+    #[test]
+    fn listen_address_defaults_to_loopback_and_can_be_explicitly_set_for_containers() {
+        let default = serde_json::to_value(Config::default()).unwrap();
+        assert_eq!(default["listen_address"], "127.0.0.1");
+        let config: Config =
+            toml::from_str("default_model = 'gpt-6.1-sol'\nlisten_address = '0.0.0.0'\n").unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(config).unwrap()["listen_address"],
+            "0.0.0.0"
+        );
+        assert!(toml::from_str::<Config>("listen_address = 'not-an-ip'").is_err());
     }
 }

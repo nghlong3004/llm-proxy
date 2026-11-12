@@ -13,15 +13,16 @@ use crate::{
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    extract::{DefaultBodyLimit, FromRequest, Request, State, rejection::JsonRejection},
+    http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{convert::Infallible, sync::Arc, time::Duration};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+type AdmissionPermit = Arc<OwnedSemaphorePermit>;
 #[derive(Clone)]
 pub struct AppState {
     pub store: Store,
@@ -56,16 +57,11 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .with_state(state)
 }
-async fn messages(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    payload: Result<Json<Value>, JsonRejection>,
-) -> Response {
+async fn messages(State(state): State<AppState>, request: Request) -> Response {
     let protocol = state.protocol.clone();
     let request_id = uuid::Uuid::new_v4().to_string();
     let mut log = Some(RequestLog::new(request_id.clone()));
-    let mut response = match generate_response(state, headers, payload, &request_id, &mut log).await
-    {
+    let response = match generate_response(state, request, &request_id, &mut log).await {
         Ok(response) => response,
         Err(error) => {
             if let Some(log) = log.as_mut() {
@@ -74,19 +70,62 @@ async fn messages(
             error_response(protocol.as_ref(), error)
         }
     };
-    if let Ok(value) = HeaderValue::from_str(&request_id) {
+    tag_response(response, &request_id)
+}
+fn tag_response(mut response: Response, request_id: &str) -> Response {
+    if let Ok(value) = HeaderValue::from_str(request_id) {
         response.headers_mut().insert("x-request-id", value);
     }
     response
 }
+fn admit(state: &AppState) -> Result<AdmissionPermit, ProxyError> {
+    state
+        .permits
+        .clone()
+        .try_acquire_owned()
+        .map(Arc::new)
+        .map_err(|_| {
+            ProxyError::new(
+                503,
+                FailureKind::NoAccounts,
+                "Proxy concurrency limit reached; retry shortly",
+            )
+        })
+}
+async fn read_json(state: &AppState, request: Request) -> Result<Value, ProxyError> {
+    let Json(value) = tokio::time::timeout(
+        Duration::from_secs(30),
+        Json::<Value>::from_request(request, state),
+    )
+    .await
+    .map_err(|_| {
+        ProxyError::new(408, FailureKind::InvalidRequest, "Request body timeout")
+            .with_code("request_body_timeout")
+    })?
+    .map_err(json_error)?;
+    Ok(value)
+}
+fn retain_admission(response: Response, permit: AdmissionPermit) -> Response {
+    response.map(|body| {
+        Body::from_stream(async_stream::stream! {
+            let _permit = permit;
+            let mut chunks = body.into_data_stream();
+            while let Some(chunk) = chunks.next().await {
+                yield chunk;
+            }
+        })
+    })
+}
 async fn generate_response(
     state: AppState,
-    headers: HeaderMap,
-    payload: Result<Json<Value>, JsonRejection>,
+    request: Request,
     request_id: &str,
     log: &mut Option<RequestLog>,
 ) -> Result<Response, ProxyError> {
-    let Json(value) = payload.map_err(json_error)?;
+    // Admit before buffering JSON, not just before dispatching upstream.
+    let permit = admit(&state)?;
+    let headers = request.headers().clone();
+    let value = read_json(&state, request).await?;
     let request = Arc::new(state.protocol.decode(value)?);
     state
         .config
@@ -95,19 +134,15 @@ async fn generate_response(
     let excluded = std::collections::HashSet::new();
     let provider_name = state.config.default_provider.clone();
     let store = state.store.clone();
-    tokio::task::spawn_blocking(move || {
+    let preparation_permit = permit.clone();
+    let account = tokio::task::spawn_blocking(move || {
+        let _permit = preparation_permit;
         store.select_for_provider_at(&provider_name, &excluded, now())
     })
     .await
-    .map_err(|_| ProxyError::storage())??;
+    .map_err(|_| ProxyError::storage())??
+    .account;
     state.providers.get(&state.config.default_provider)?;
-    let permit = state.permits.clone().try_acquire_owned().map_err(|_| {
-        ProxyError::new(
-            503,
-            FailureKind::NoAccounts,
-            "Proxy concurrency limit reached; retry shortly",
-        )
-    })?;
     let session_id = headers
         .get("x-claude-code-session-id")
         .and_then(|v| v.to_str().ok())
@@ -122,14 +157,19 @@ async fn generate_response(
         request_id: request_id.to_owned(),
         session_id,
     };
-    let mut events = routing::generate(state.clone(), request.clone(), context);
+    let mut events = routing::generate(
+        state.clone(),
+        request.clone(),
+        context,
+        account,
+        permit.clone(),
+    );
     let adapter = state.protocol.clone();
     let response = if request.stream {
         let mut log = log
             .take()
             .ok_or_else(|| ProxyError::protocol("Missing request trace"))?;
         let body = async_stream::stream! {
-            let _permit = permit;
             let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -171,7 +211,6 @@ async fn generate_response(
         )
             .into_response()
     } else {
-        let _permit = permit;
         let mut accumulator = Accumulator::default();
         while let Some(event) = events.next().await {
             accumulator.accept(event?)?;
@@ -182,28 +221,27 @@ async fn generate_response(
         }
         Json(adapter.encode_response(output)).into_response()
     };
-    Ok(response)
+    Ok(retain_admission(response, permit))
 }
-async fn count_tokens(
-    State(state): State<AppState>,
-    payload: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    match token_count(&state, payload).await {
+async fn count_tokens(State(state): State<AppState>, request: Request) -> Response {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let response = match token_count(&state, request).await {
         Ok(response) => response.into_response(),
         Err(error) => error_response(state.protocol.as_ref(), error),
-    }
+    };
+    tag_response(response, &request_id)
 }
-async fn token_count(
-    state: &AppState,
-    payload: Result<Json<Value>, JsonRejection>,
-) -> Result<Json<Value>, ProxyError> {
-    let Json(value) = payload.map_err(json_error)?;
+async fn token_count(state: &AppState, request: Request) -> Result<Json<Value>, ProxyError> {
+    let permit = admit(state)?;
+    let value = read_json(state, request).await?;
     let request = state.protocol.decode(value)?;
     state
         .config
         .resolve(&request.model)
         .map_err(|e| ProxyError::invalid(e.to_string()).with_code("unknown_model"))?;
     let count = tokio::task::spawn_blocking(move || {
+        // A dropped HTTP waiter must not release capacity while this job still runs.
+        let _permit = permit;
         crate::providers::codex::request::estimate_tokens(&request)
     })
     .await

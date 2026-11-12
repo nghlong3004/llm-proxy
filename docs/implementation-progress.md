@@ -5,6 +5,11 @@ Kế hoạch: `docs/superpowers/plans/2026-11-12-llm-proxy-v1.md`.
 
 ## Trạng thái hiện tại
 
+Mốc mới nhất **2026-11-13**: Docker/Compose + runtime hardening, full gate **93
+pass**, container smoke và resource soak 180s pass. Xem mục “Kết quả Docker +
+hardening + resource soak” bên dưới để biết số RAM/CPU thực tế và giới hạn đo.
+Native service/binary đã install trước đây chưa được thay/restart ở mốc này.
+
 Đã triển khai CLI, config/model registry, private account storage, browser/device
 OAuth + refresh, sticky quota failover, Codex HTTP/SSE, Anthropic streaming/buffered,
 tool/ảnh/reasoning/structured output/search và portable history. Chưa nghiệm thu
@@ -240,6 +245,131 @@ và release build đều PASS, exit 0. Output /tmp/llm-proxy-precommit-checks.lo
 Initial commit gom source/lockfile/tests/docs/CI/systemd; không có credential,
 build artifacts hoặc runtime log; không push trong mốc này. Hash xem git log.
 Native subscription acceptance và clean Ubuntu VM acceptance vẫn chưa xác nhận.
+
+## Docker packaging — đang triển khai
+
+User yêu cầu Dockerfile và host local trỏ được vào container. Mở rộng explicit
+listen_address/--listen-address cho container, mặc định host vẫn 127.0.0.1.
+Docker runtime bind 0.0.0.0 bên trong; Compose publish 127.0.0.1:18765:18765.
+Multi-stage Rust stable/Debian runtime, non-root, private named volume, SIGINT
+shutdown. .dockerignore whitelist nguồn cần build để không gửi state/.git/target.
+Login container bằng device-code; không tự copy credential host. Giữ nguyên
+systemd service hiện tại, smoke container dùng cổng host random và volume giả riêng.
+
+Kế hoạch kiểm tra: config/CLI regression RED→GREEN; full Rust checks; build image;
+Compose smoke từ host, non-root, permission/state persistence/hot removal và
+SIGINT stop/flush. Chưa đánh dấu Docker hoạt động khi chưa có kết quả chạy thật.
+
+Mốc listener/package skeleton: đã thêm `listen_address: IpAddr` mặc định loopback,
+CLI override và bind/log SocketAddr; không thay hành vi native mặc định. Hai test
+Docker RED ban đầu đã GREEN; unit suite **8 pass**, CLI suite **4 pass**, gồm
+reject IP sai trước khi tạo state. `cargo fmt` và `docker compose config --quiet`
+PASS. Đã thêm multi-stage Dockerfile, Compose loopback publish + named volume và
+allowlisted build context; image build/runtime smoke và full gate còn phải chạy.
+Không đổi systemd/credential hiện có. Giữ việc xóa THIRD_PARTY_NOTICES.md theo user,
+chuyển copyright phần schema port vào LICENSE MIT hiện có và ship cùng image.
+
+Full Rust gate sau listener fix: **PASS**, exit 0: fmt check, strict Clippy,
+**66 tests pass (0 fail/ignored)** và release build (1m20s). Output
+`/tmp/claude-1000/-home-nghlong3004-projects-llm-proxy/446044fa-422f-40e9-aaf7-61a25fc9bc77/tasks/blc9icegj.output`.
+README/architecture/conventions/config example đã cập nhật Docker/listen address;
+AGENTS chỉ bổ sung security/verification Docker. Thêm script smoke tái chạy được
+`scripts/check-docker.py`; image build vẫn đang chạy, chưa nghiệm thu container.
+
+## Hardening và đo tài nguyên — 2026-11-13 (đang triển khai)
+
+User yêu cầu sửa các findings, kiểm tra RAM/tài nguyên khi chạy lâu, rồi add+commit;
+không push và **không Co-Authored-By trailer**. Đã tạo branch
+`fix/docker-runtime-hardening`. Docker image build đầu tiên PASS; chưa chạy container
+smoke vì đang mở rộng sửa runtime, sẽ rebuild image sau hardening.
+
+Admission regression RED xác nhận overload vẫn đọc body trước kiểm tra permit.
+Fix chuyển admission trước JSON (messages và count_tokens), upload timeout 30s,
+giữ permit qua response body và blocking tokenizer kể cả HTTP waiter bị cancel;
+reuse preflight account làm first routing candidate. Server suite **7 pass** ở
+mốc đầu (gồm hai regression mới); sau bổ sung buffered/error-recovery, server suite
+**8 pass**. Credential lifecycle GREEN đầu tiên: accounts **10 pass**, HTTP/OAuth
+**8 pass** gồm localhost/ignored; đang mở rộng shutdown/race coverage. Đã tái hiện
+RED caller cancel tạo hai OAuth exchange thay vì single-flight, selected removal
+bị map Transport, và credential cũ tồn dư; fix có task ownership/drain bounded,
+try-lock polling ngoài Tokio để shutdown không kẹt lock wait. Output/quota/search
+regressions cũng đã quan sát RED, đang sửa độc lập. `scripts/check-resources.py`
+dùng release process/state/upstream fake, sẽ đo RSS/CPU/FD/thread qua warmup + soak
+180s + near-limit input + idle; chưa có kết quả đo, chưa tuyên bố không leak.
+
+Output/quota/search GREEN đầu tiên: accumulator **4**, stream **14**, protocol
+**7**, translation **9** đều pass; đang bổ sung direct-search budget regression.
+Docker smoke trên image trước hardening **PASS**, exit 0: non-root, volume mới
+đúng quyền, CLI override, host HTTP/no-account, persistence qua recreate,
+account giả hot remove và SIGINT flush. Project/volume tạm đã dọn. Sẽ rebuild và
+rerun sau các fix runtime, không dùng kết quả image cũ để nghiệm thu code mới.
+
+Output/quota/search focused GREEN cuối: accumulator **4**, stream **14**, protocol
+**7**, translation **11** pass. Credential lifecycle focused GREEN cuối: accounts
+**13**, HTTP **11**, OAuth units **2** pass. Parent bổ sung bound riêng 32 provider
+blocking tokenizer jobs vì cancel generation không cancel `spawn_blocking`;
+hai unit regression capacity/cancel giữ slot đã pass.
+
+Full gate cuối **PASS**, exit 0: fmt check, strict all-target/all-feature Clippy,
+**93 tests pass (0 fail/ignored)**, release build. Output
+`/tmp/claude-1000/-home-nghlong3004-projects-llm-proxy/446044fa-422f-40e9-aaf7-61a25fc9bc77/tasks/bwocg7fx0.output`.
+Systemd packaged unit verify và Compose config PASS; chưa đổi service đã cài.
+
+Resource harness quick-check **PASS**, 10s/2 workers, 374 lượt (315 complete,
+40 cancel, 19 count); FD về 11, active upstream về 0, idle CPU 0%. RSS sau warmup
+61 MiB, sau tải 78.5 MiB; input gần 32 MiB tạo peak 237 MiB và idle còn 175 MiB.
+Đây là finite check/allocator high-water, chưa kết luận leak-free. Soak chính
+180s/8 workers và final Docker rebuild+smoke đang chạy; sẽ ghi kết quả thật.
+
+## Kết quả Docker + hardening + resource soak — 2026-11-13
+
+Hoàn tất code/package của mốc này; không nghiệm thu subscription thật:
+
+- Full gate cuối: fmt **PASS**; strict Clippy **PASS**; **93 tests PASS, 0 fail,
+  0 ignored**; release build **PASS**. Không đổi dependencies/Cargo.lock.
+- Final `docker compose --progress plain build` + `python3 -I scripts/check-docker.py`
+  **PASS**, exit 0. Image gồm toàn bộ hardening, runtime non-root 10001:10001,
+  no Rust compiler, fresh volume quyền đúng, override IP/port từ CLI thật, host
+  HTTP/count/no-account errors, persistent state, hot remove account giả, SIGINT
+  exit 0 + log flush. Project/volume smoke đã dọn. Docker log:
+  `/tmp/claude-1000/-home-nghlong3004-projects-llm-proxy/446044fa-422f-40e9-aaf7-61a25fc9bc77/tasks/bavc2g68i.output`.
+- Resource soak release process thật + fake upstream: **PASS**, 180 giây,
+  8 workers, **19.352 lượt**: 16.458 complete, 1.930 cancelled, 964 token count.
+  Sau warm-up RSS 77,88 MiB; dưới tải sample khoảng 78,64–112,45 MiB, high-water
+  123,05 MiB; quiesce sau soak 92,21 MiB. FD cuối = baseline **11**; threads tải
+  **17** và sau idle **6**; active fake upstream về **0**. Saturation 32 slots và
+  recovery đều pass.
+- Một input riêng gần 32 MiB tạo peak RSS **268 MiB**; sau 30s idle RSS
+  **237,51 MiB**. Allocator/high-water có thể giữ RAM sau input lớn, không hứa RSS
+  quay về baseline. Tăng median đầu/cuối soak 24,03 MiB, samples có giảm trở lại,
+  không quan sát tăng không giới hạn trong cửa sổ này; không phải chứng minh
+  leak-free nhiều ngày. 32 request/output/input buffers cùng JSON copies vẫn có
+  thể cần RAM cao hơn nhiều ở worst-case concurrency.
+- CPU proxy tải giả **50,58% một core**, idle **0,03% một core**. Môi trường WSL
+  còn build Docker song song trong một phần phép đo; không dùng số này làm
+  throughput/latency benchmark cô lập. Near-limit input tách khỏi steady workload.
+  Snapshot/trace JSON: `/tmp/llm-proxy-resources-446044fa-final.json`.
+- Script tự dọn release process/state giả; không đọc credential thật, không dùng
+  quota/provider bên ngoài, không reinstall binary/restart service user, không push.
+
+AGENTS làm rõ auth/account-change reselection, refresh exception khi cancel,
+Docker security/verification và fallback đọc project-context checklist khi skill
+không được harness discover. Giữ xóa THIRD_PARTY_NOTICES.md; copyright phần schema
+port nằm trong LICENSE và runtime image. User yêu cầu add+commit không trailer;
+branch `fix/docker-runtime-hardening`, hash xem git log sau commit.
+
+## Review source — đầu vào hardening
+
+Review read-only trong phiên Docker nêu hai ưu tiên correctness: refresh token
+rotation có thể bị bỏ dở khi generation future bị cancel trước persistence;
+initial tool-call name/ID chưa được cộng đủ vào output budget 16 MiB. Các case
+khác: error.code=null che error.type quota, remove account giữa select/refresh bị
+map thành transport thay vì reselect, forced WebSearch shortcut bỏ context, và
+credential generation cũ còn lại sau re-login. Tối ưu có cơ sở là tránh select/read
+account lặp giữa HTTP preflight và routing. Đây là các findings source ban đầu;
+mốc hardening ở trên đã sửa và bổ sung regression cho các case này sau khi user
+mở rộng yêu cầu. Snapshot 66 tests trước đó chưa phủ các case này; full gate mới
+có 93 tests. Không refactor rộng ngoài các lifecycle/budget/admission cần thiết.
 
 ## Công việc tiếp theo
 

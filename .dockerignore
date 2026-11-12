@@ -1,0 +1,22 @@
+# Only build inputs may enter the context, even when state lives in the checkout.
+**
+!Dockerfile
+!.dockerignore
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!LICENSE
+!src/
+!src/**
+
+# State/secrets must remain excluded even if accidentally placed under src/.
+**/.env
+**/.env.*
+**/config.toml
+**/accounts.json
+**/credentials
+**/reasoning.key
+**/registry.lock
+**/locks
+**/logs
+**/*.log

@@ -31,4 +31,4 @@ relaxes tool argument validation, matching the reference's native compatibility
 policy; literal defaults/examples/property names are preserved.
 
 Reference: https://github.com/raine/claude-code-proxy/tree/fe107180f7a69c6d63dd4421a6567cf641c1f103
-MIT attribution is retained in `THIRD_PARTY_NOTICES.md`.
+MIT attribution is retained in the repository's `LICENSE`.

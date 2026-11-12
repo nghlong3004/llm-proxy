@@ -33,6 +33,85 @@ fn anthropic_tools_and_images_become_native_codex_input() {
     assert_eq!(value["store"], false);
 }
 #[test]
+fn forced_search_without_dedicated_marker_preserves_full_history_in_both_lanes() {
+    for model_id in ["gpt-5.5", "gpt-6.1-sol"] {
+        let request = Anthropic.decode(json!({"model":"sonnet","tools":[{"type":"web_search_20250305","name":"web_search"}],"tool_choice":{"type":"tool","name":"web_search"},"messages":[{"role":"user","content":"Earlier context about Rust"},{"role":"assistant","content":"Which release?"},{"role":"user","content":"Find its latest release"}]})).unwrap();
+        assert!(llm_proxy::providers::codex::search::query(&request).is_none());
+        let config = Config {
+            default_model: Some(model_id.into()),
+            ..Default::default()
+        };
+        let native = translate(
+            &request,
+            &config.resolve("sonnet").unwrap(),
+            "a",
+            "g",
+            &ReasoningSigner::new([0; 32]),
+            None,
+        )
+        .unwrap();
+        let serialized = native.to_string();
+        assert!(serialized.contains("Earlier context about Rust"));
+        assert!(serialized.contains("Find its latest release"));
+        assert!(serialized.contains("web_search"));
+    }
+}
+
+#[test]
+fn dedicated_search_marker_keeps_the_direct_search_bridge() {
+    let mut request = Anthropic.decode(json!({"model":"sonnet","tools":[{"type":"web_search_20250305","name":"web_search"}],"tool_choice":{"type":"tool","name":"web_search"},"messages":[{"role":"user","content":"Perform a web search for the query: Rust releases"}]})).unwrap();
+    assert_eq!(
+        llm_proxy::providers::codex::search::query(&request).as_deref(),
+        Some("Rust releases")
+    );
+    request.messages.push(llm_proxy::domain::Message {
+        role: llm_proxy::domain::Role::User,
+        content: vec![Content::Text("Follow up using earlier context".into())],
+    });
+    assert!(llm_proxy::providers::codex::search::query(&request).is_none());
+}
+
+#[test]
+fn direct_search_checks_query_and_structured_results_before_copying() {
+    let request = Anthropic
+        .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"search"}]}))
+        .unwrap();
+    assert!(
+        llm_proxy::providers::codex::search::events(
+            json!({"output":"answer"}),
+            &request,
+            &"x".repeat(16 * 1024 * 1024 + 1),
+            1
+        )
+        .is_err()
+    );
+    let response = json!({"output":"answer","results":[{"url":"https://example.com","title":"x".repeat(16 * 1024 * 1024 + 1)}]});
+    assert!(llm_proxy::providers::codex::search::events(response, &request, "q", 1).is_err());
+}
+
+#[test]
+fn direct_search_preserves_normal_hosted_results_and_text() {
+    let request = Anthropic
+        .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"search"}]}))
+        .unwrap();
+    let events = llm_proxy::providers::codex::search::events(json!({"output":"answer [source](https://example.com)","results":[{"url":"https://example.com","title":"Source"}]}), &request, "q", 1).unwrap();
+    let mut accumulator = llm_proxy::domain::accumulator::Accumulator::default();
+    for event in events {
+        accumulator.accept(event).unwrap();
+    }
+    let output = accumulator.finish().unwrap();
+    assert!(
+        matches!(&output.content[0], Content::HostedCall { input, .. } if input["query"] == "q")
+    );
+    assert!(
+        matches!(&output.content[1], Content::HostedResult { results, .. } if results.as_array().unwrap().len() == 1 && results[0]["title"] == "Source")
+    );
+    assert!(
+        matches!(&output.content[2], Content::Text(text) if text == "answer [source](https://example.com)")
+    );
+}
+
+#[test]
 fn reasoning_replays_only_for_same_account_generation_and_model() {
     let signer = ReasoningSigner::new([4; 32]);
     let signature = signer

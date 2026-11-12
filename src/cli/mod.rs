@@ -29,11 +29,14 @@ enum Command {
         #[command(subcommand)]
         command: AccountsCommand,
     },
-    /// Serve the client API on 127.0.0.1.
+    /// Serve the client API; defaults to loopback only.
     Serve {
         /// Provider model used for unmapped client aliases; overrides config.toml.
         #[arg(long, value_name = "MODEL_ID")]
         default_model: Option<String>,
+        /// Listening IP; use 0.0.0.0 inside a container, not on a public host.
+        #[arg(long, value_name = "IP_ADDRESS")]
+        listen_address: Option<std::net::IpAddr>,
         /// Local API listening port; overrides config.toml.
         #[arg(long, value_name = "PORT")]
         listen_port: Option<u16>,
@@ -136,6 +139,7 @@ pub async fn run() -> Result<()> {
         }
         Command::Serve {
             default_model,
+            listen_address,
             listen_port,
         } => {
             let config_store = store.clone();
@@ -143,6 +147,9 @@ pub async fn run() -> Result<()> {
                 tokio::task::spawn_blocking(move || Config::load(config_store.root())).await??;
             if let Some(model) = default_model {
                 config.default_model = Some(model);
+            }
+            if let Some(address) = listen_address {
+                config.listen_address = address;
             }
             if let Some(port) = listen_port {
                 config.listen_port = port;
@@ -162,14 +169,15 @@ pub async fn run() -> Result<()> {
                     .await??;
             providers.register(Arc::new(codex));
             providers.get(&config.default_provider)?;
-            let port = config.listen_port;
+            let address = std::net::SocketAddr::new(config.listen_address, config.listen_port);
             let state = AppState::new(store, config, providers);
             let shutdown = state.clone();
-            let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+            let providers = state.providers.clone();
+            let listener = tokio::net::TcpListener::bind(address)
                 .await
-                .with_context(|| format!("Cannot listen on 127.0.0.1:{port}"))?;
-            println!("llm-proxy listening at http://127.0.0.1:{port}");
-            tracing::info!(listen_port = port, provider = %state.config.default_provider,
+                .with_context(|| format!("Cannot listen on {address}"))?;
+            println!("llm-proxy listening at http://{address}");
+            tracing::info!(listen_address = %address.ip(), listen_port = address.port(), provider = %state.config.default_provider,
                 default_model = ?state.config.default_model, event = "proxy_started");
             axum::serve(listener, router(state))
                 .with_graceful_shutdown(async move {
@@ -178,6 +186,7 @@ pub async fn run() -> Result<()> {
                     }
                 })
                 .await?;
+            providers.shutdown().await;
             tracing::info!(event = "proxy_stopped");
         }
     }

@@ -80,6 +80,209 @@ async fn parallel_refresh_is_single_flight_and_preserves_rotated_refresh_token()
     );
     server.abort();
 }
+#[derive(Clone, Default)]
+struct PausedRefresh {
+    count: Arc<AtomicUsize>,
+    rotated: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+async fn paused_refresh(State(state): State<PausedRefresh>) -> axum::response::Response {
+    let first = state.count.fetch_add(1, Ordering::SeqCst) == 0;
+    let stream = async_stream::stream! {
+        yield Ok::<_, std::convert::Infallible>(Bytes::from_static(b"{\"access_token\":\"renewed\","));
+        if first {
+            state.rotated.notify_one();
+            state.release.notified().await;
+        }
+        yield Ok(Bytes::from_static(b"\"refresh_token\":\"rotated\",\"expires_in\":3600}"));
+    };
+    (
+        [("content-type", "application/json")],
+        Body::from_stream(stream),
+    )
+        .into_response()
+}
+
+#[tokio::test]
+#[ignore = "requires loopback sockets; run cargo test -- --include-ignored on the host"]
+async fn cancelled_refresh_caller_does_not_lose_rotation_or_release_single_flight() {
+    let state = PausedRefresh::default();
+    let (url, server) = serve(
+        Router::new()
+            .route("/oauth/token", post(paused_refresh))
+            .with_state(state.clone()),
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let account = store.login("a", credential("a", 0)).unwrap();
+    let auth = AuthClient::with_issuer(url).unwrap();
+    let caller = {
+        let auth = auth.clone();
+        let store = store.clone();
+        let id = account.id.clone();
+        tokio::spawn(async move { auth.refresh(&store, &id, None).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), state.rotated.notified())
+        .await
+        .unwrap();
+    caller.abort();
+    assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+    let second = {
+        let auth = auth.clone();
+        let store = store.clone();
+        let id = account.id.clone();
+        tokio::spawn(async move { auth.refresh(&store, &id, None).await })
+    };
+    state.release.notify_one();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .refresh_token,
+        "rotated"
+    );
+    assert_eq!(
+        state.count.load(Ordering::SeqCst),
+        1,
+        "cancel must not release the refresh single-flight lock before persistence"
+    );
+    assert_eq!(
+        store.lease(&account.id).unwrap().credential.refresh_token,
+        "rotated"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires loopback sockets; run cargo test -- --include-ignored on the host"]
+async fn registry_shutdown_drains_cancelled_rotation_and_closes_refresh_admission() {
+    use llm_proxy::providers::ProviderRegistry;
+    let state = PausedRefresh::default();
+    let (url, server) = serve(
+        Router::new()
+            .route("/oauth/token", post(paused_refresh))
+            .with_state(state.clone()),
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let account = store.login("a", credential("a", 0)).unwrap();
+    let auth = AuthClient::with_issuer(url).unwrap();
+    let mut providers = ProviderRegistry::default();
+    providers.register(Arc::new(
+        Codex::with_auth(store.clone(), Arc::new(Config::default()), auth.clone()).unwrap(),
+    ));
+    let caller = {
+        let auth = auth.clone();
+        let store = store.clone();
+        let id = account.id.clone();
+        tokio::spawn(async move { auth.refresh(&store, &id, None).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), state.rotated.notified())
+        .await
+        .unwrap();
+    caller.abort();
+    let _ = caller.await;
+    let mut drain = tokio::spawn(async move { providers.shutdown().await });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut drain)
+            .await
+            .is_err(),
+        "shutdown must wait for the rotated response body and persistence"
+    );
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            auth.refresh(&store, &account.id, None)
+        )
+        .await
+        .unwrap()
+        .is_err()
+    );
+    state.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.lease(&account.id).unwrap().credential.refresh_token,
+        "rotated"
+    );
+    assert_eq!(state.count.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires loopback sockets; run cargo test -- --include-ignored on the host"]
+async fn rotation_finishing_after_relogin_or_removal_never_overwrites_or_resurrects() {
+    use llm_proxy::authentication::RefreshError;
+    for remove in [false, true] {
+        let state = PausedRefresh::default();
+        let (url, server) = serve(
+            Router::new()
+                .route("/oauth/token", post(paused_refresh))
+                .with_state(state.clone()),
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let selected = store.login("a", credential("a", 0)).unwrap();
+        let auth = AuthClient::with_issuer(url).unwrap();
+        let caller = {
+            let auth = auth.clone();
+            let store = store.clone();
+            let selected = selected.clone();
+            tokio::spawn(async move {
+                auth.refresh_for_generation(&store, &selected.id, &selected.generation, None)
+                    .await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), state.rotated.notified())
+            .await
+            .unwrap();
+        if remove {
+            store.remove(&selected.id).unwrap();
+        } else {
+            let mut replacement = credential("a", u64::MAX);
+            replacement.refresh_token = "replacement-refresh".into();
+            store.login("new", replacement).unwrap();
+        }
+        state.release.notify_one();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), caller)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(RefreshError::AccountChanged)));
+        auth.shutdown().await;
+        let registry = store.list().unwrap();
+        if remove {
+            assert!(registry.accounts.is_empty());
+            assert_eq!(
+                std::fs::read_dir(dir.path().join("credentials"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        } else {
+            assert_ne!(registry.accounts[0].generation, selected.generation);
+            assert_eq!(
+                store.lease(&selected.id).unwrap().credential.refresh_token,
+                "replacement-refresh"
+            );
+            assert_eq!(
+                std::fs::read_dir(dir.path().join("credentials"))
+                    .unwrap()
+                    .count(),
+                1
+            );
+        }
+        server.abort();
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires loopback sockets; run cargo test -- --include-ignored on the host"]
 async fn http_sse_transport_headers_and_fragmented_utf8_follow_the_native_contract() {
@@ -354,6 +557,105 @@ async fn lite_http_request_must_match_the_real_raine_translator_contract() {
         ));
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn corrupt_selected_credential_is_storage_failure_not_reselection_or_transport() {
+    use llm_proxy::{domain::error::FailureKind, protocols::ProtocolAdapter};
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let account = store.login("a", credential("a", 0)).unwrap();
+    let path = dir
+        .path()
+        .join("credentials")
+        .join(format!("{}-{}.json", account.id, account.generation));
+    std::fs::write(path, b"invalid json").unwrap();
+    let config = Config {
+        default_model: Some("gpt-5.5".into()),
+        ..Default::default()
+    };
+    let provider = Codex::new(store, Arc::new(config)).unwrap();
+    let request = llm_proxy::protocols::anthropic::Anthropic
+        .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"synthetic"}]}))
+        .unwrap();
+    let error = match provider
+        .generate(
+            Arc::new(request),
+            account,
+            RequestContext {
+                request_id: "corrupt".into(),
+                session_id: None,
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("corrupt storage must stop dispatch"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind, FailureKind::Storage);
+}
+
+#[tokio::test]
+#[ignore = "requires loopback sockets; run cargo test -- --include-ignored on the host"]
+async fn selected_removed_or_replaced_account_is_not_transport_or_refreshed() {
+    use llm_proxy::{domain::error::FailureKind, protocols::ProtocolAdapter};
+    let calls = Arc::new(AtomicUsize::new(0));
+    async fn unexpected(State(calls): State<Arc<AtomicUsize>>) -> StatusCode {
+        calls.fetch_add(1, Ordering::SeqCst);
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+    let (url, server) = serve(
+        Router::new()
+            .route("/oauth/token", post(unexpected))
+            .route("/responses", post(unexpected))
+            .with_state(calls.clone()),
+    )
+    .await;
+    for remove in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let selected = store.login("selected", credential("a", 0)).unwrap();
+        if remove {
+            store.remove(&selected.id).unwrap();
+        } else {
+            store.login("replacement", credential("a", 0)).unwrap();
+        }
+        let config = Config {
+            default_model: Some("gpt-5.5".into()),
+            codex_endpoint: format!("{url}/responses"),
+            ..Default::default()
+        };
+        let provider = Codex::with_auth(
+            store,
+            Arc::new(config),
+            AuthClient::with_issuer(url.clone()).unwrap(),
+        )
+        .unwrap();
+        let request = llm_proxy::protocols::anthropic::Anthropic
+            .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"synthetic"}]}))
+            .unwrap();
+        let error = match provider
+            .generate(
+                Arc::new(request),
+                selected,
+                RequestContext {
+                    request_id: "mutation".into(),
+                    session_id: None,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("stale selection must not dispatch"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, FailureKind::AccountChanged);
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a stale selection must not refresh a newer login"
+    );
+    server.abort();
 }
 
 #[tokio::test]

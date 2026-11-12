@@ -15,7 +15,72 @@ agent/giao thức hoặc backend khác; phiên bản này chưa có backend khá
 Máy Ubuntu mới: xem [hướng dẫn cài từ GitHub](docs/ubuntu-setup.md), gồm Rust,
 Claude Code, login, chạy nền và cấu hình để chỉ cần gõ `claude`.
 
-## Cài và build
+## Chạy bằng Docker — không cần cài Rust
+
+Cần Docker Engine + Docker Compose. Sau khi clone repository:
+
+```sh
+docker compose up -d --build
+docker compose exec proxy llm-proxy accounts login --name personal --login-method device-code
+docker compose exec proxy llm-proxy accounts list
+```
+
+Rust chỉ nằm trong build stage; runtime image chạy binary bằng user non-root.
+Đây là build image local từ source, chưa có prebuilt image được publish. Lần build
+đầu cần mạng để tải base image và dependency. Device-code login in URL/code để bạn
+mở trong trình duyệt trên host; không cần Rust, callback port hay credential Codex CLI.
+Không copy credential host vào container.
+
+Proxy được publish tại `http://127.0.0.1:18765`; dùng cấu hình Claude Code ở phần
+[Kết nối Claude Code](#kết-nối-claude-code) bên dưới. Nếu systemd/foreground proxy
+đang chiếm cổng này, chọn cổng khác cho Docker, không chạy hai instance cùng cổng:
+
+```sh
+LLM_PROXY_PORT=18766 LLM_PROXY_MODEL=gpt-6.1-sol docker compose up -d --build
+# Khi đó ANTHROPIC_BASE_URL=http://127.0.0.1:18766
+```
+
+Giữ cùng giá trị `LLM_PROXY_PORT`/`LLM_PROXY_MODEL` ở các lần `up` tiếp theo; có thể
+đặt trong file `.env` local (không commit). Model phải thuộc quyền account của bạn;
+đổi biến model rồi chạy lại `up -d` để recreate container. Docker dùng model policy
+mặc định của ứng dụng; config trên host không được tự copy vào volume.
+
+```sh
+docker compose logs -f proxy
+docker compose exec proxy llm-proxy accounts list --output-format json
+docker compose exec proxy llm-proxy accounts remove ACCOUNT_ID
+docker compose stop
+# Start lại container đã tạo:
+docker compose start
+# Cập nhật sau khi pull source; giữ các biến port/model như lần trước:
+docker compose up -d --build
+# Xóa container/network, GIỮ account và config:
+docker compose down
+```
+
+Account/config/log lưu trong named volume của Compose, tại
+`/var/lib/llm-proxy/state` trong container; không mất khi recreate/update. Volume
+mới được chuẩn bị cho UID/GID `10001:10001`, thư mục state `0700`, file private
+`0600`. Không dùng `volume.nocopy`; volume/bind mount tự tạo sai ownership không
+được tự sửa bằng root entrypoint. **`docker compose down -v` xóa cả volume, account
+và credential; phải đăng nhập lại.** Không đổi Compose project name nếu muốn dùng
+lại volume cũ.
+
+Nếu cần cấu hình lane/alias, ghi config example vào volume bằng chính user runtime,
+sau đó restart container (CLI model/port/address vẫn ghi đè TOML):
+
+```sh
+docker compose exec -T proxy sh -c 'umask 077; tee "$LLM_PROXY_STATE_DIR/config.toml" >/dev/null' < config.example.toml
+docker compose restart proxy
+```
+
+Container bind `0.0.0.0` bên trong nhưng Compose chỉ publish loopback của host.
+API **chưa có client authentication**: không đổi publish sang `0.0.0.0`, không dùng
+host networking hoặc nối container không tin cậy vào cùng network. Các container
+cùng network vẫn có thể gọi proxy và sử dụng quota. Docker stop dùng SIGINT để
+hủy upstream và flush log; không cần thêm daemon trong container.
+
+## Cài và build bằng Rust
 
 Cần Rust stable mới nhất (tối thiểu 1.99), C compiler/linker và `pkg-config`.
 `rust-toolchain.toml` chọn stable + rustfmt/Clippy; `Cargo.lock` giữ phiên bản crate
@@ -53,8 +118,9 @@ llm-proxy accounts login --name work --login-method device-code
 Device login có thể cần được bật trong ChatGPT security/workspace settings.
 Proxy sở hữu credential riêng và không đọc/ghi `~/.codex/auth.json`.
 
-Mặc định server nghe tại `http://127.0.0.1:18765`. Chỉ hỗ trợ loopback trong v1.
-Listener không xác thực client; `ANTHROPIC_AUTH_TOKEN` chỉ đáp ứng cấu hình client,
+Mặc định server nghe tại `http://127.0.0.1:18765`. `--listen-address`/`listen_address`
+cho phép bind IP khác, chủ yếu dùng `0.0.0.0` bên trong container; không expose API
+ra mạng công cộng. Listener không xác thực client; `ANTHROPIC_AUTH_TOKEN` chỉ đáp ứng cấu hình client,
 không thay thế token ChatGPT. Chương trình local truy cập được listener có thể
 sử dụng quota của các account đã đăng nhập.
 
@@ -140,6 +206,7 @@ thư mục state, rồi chỉnh model. Ví dụ:
 ```toml
 default_provider = "codex"
 default_model = "gpt-6.1-sol"
+listen_address = "127.0.0.1"
 listen_port = 18765
 
 [aliases]
@@ -151,7 +218,7 @@ opus = "gpt-6-astra"
 responses_lite = false
 ```
 
-`serve --default-model` và `serve --listen-port` ghi đè giá trị tương ứng trong file. Cấu hình
+`serve --default-model`, `serve --listen-address` và `serve --listen-port` ghi đè giá trị tương ứng trong file. Cấu hình
 model được đọc lúc server khởi động; thay model config cần chạy lại server.
 Account được đọc lại cho request kế tiếp nên thêm/xóa/login lại không cần restart.
 
@@ -207,8 +274,10 @@ search, không có phép ánh xạ tương đương trên backend subscription. 
 là ước lượng local, không phải số billing. Nội dung vượt context window vẫn có
 thể bị backend từ chối.
 
-Backend Codex subscription có thể thay đổi giao thức. Xem
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) về source tham khảo và giấy phép.
+Backend Codex subscription có thể thay đổi giao thức. Native mapping tham khảo
+[raine/claude-code-proxy](https://github.com/raine/claude-code-proxy); revision của
+phần schema port ghi ở `src/providers/codex/schema.rs` và fixture README.
+Copyright/giấy phép MIT được giữ trong [LICENSE](LICENSE), cũng được ship trong image.
 
 ## HTTP API
 
@@ -227,10 +296,18 @@ curl -N http://127.0.0.1:18765/v1/messages \
   -d '{"model":"sonnet","stream":true,"messages":[{"role":"user","content":"Say PROXY_OK"}]}'
 ```
 
-Mặc định tối đa 32 request generation đồng thời; body request 32 MiB, frame SSE
-8 MiB, nội dung phản hồi 16 MiB. HTTP connect timeout 15 giây, response-header và
-body-idle timeout 300 giây. SSE heartbeat 15 giây. `Ctrl+C` hủy upstream và đóng
-server có kiểm soát.
+Mặc định tối đa 32 request generation/token-count đang xử lý; lấy permit trước
+khi đọc JSON, body-read timeout 30 giây và trả 503 sớm nếu quá tải. Body request
+32 MiB, frame SSE 8 MiB, output/retained data 16 MiB (kể cả initial tool metadata).
+Buffered body và blocking tokenizer giữ permit đến khi công việc thật kết thúc,
+kể cả client disconnect. Đây không phải RAM cap: request/JSON/output copies có
+thể cần hàng trăm MiB hoặc hơn khi nhiều request cùng gần giới hạn.
+
+HTTP connect timeout 15 giây, upstream response-header/body-idle timeout 300 giây;
+SSE heartbeat 15 giây. `Ctrl+C` hủy inference; OAuth refresh đã gửi được hoàn tất
+và persist độc lập với client rồi được drain khi shutdown, để giảm nguy cơ mất
+rotated token. SIGKILL, lỗi đĩa và transport ambiguity vẫn có thể buộc login lại.
+Packaged Docker/systemd stop grace 45 giây chứa OAuth timeout 30 giây.
 
 ## Log để debug
 
@@ -286,7 +363,34 @@ cargo test --locked --test http_contract -- --include-ignored
 ./scripts/check-local.sh
 ```
 
-CI chạy cả các test localhost. Để kiểm tra với provider thật, đăng nhập account
+CI chạy cả các test localhost. Khi thay đổi Docker packaging, kiểm tra thêm bằng
+image local và smoke cô lập (cần Python 3 cho script kiểm tra, không cần cho user chạy proxy):
+
+```sh
+docker compose config --quiet
+docker compose build
+python3 -I scripts/check-docker.py
+```
+
+Script tự tạo project/volume riêng và host-port ngẫu nhiên, không đọc credential
+host, không đăng nhập hoặc gọi inference. Kiểm tra non-root, private permissions,
+HTTP/no-account errors, state persistence, hot removal bằng account giả và SIGINT
+flush; chỉ xóa tài nguyên tạm do chính script tạo.
+
+Đo tài nguyên hữu hạn trên Linux bằng release process riêng và mock upstream:
+
+```sh
+cargo build --release --locked
+python3 -I scripts/check-resources.py --seconds 180 --workers 8 --output /tmp/llm-proxy-resources.json
+```
+
+Script warm-up tokenizer/allocator, trộn buffered/streaming/cancel, kiểm tra đủ
+32 slots, một input gần 32 MiB và 30 giây idle. Báo RSS/high-water, CPU theo phần
+trăm một core, FD/thread và active upstream sau tải. Phân biệt allocator giữ lại
+high-water với tăng RAM liên tục; kết quả vài phút không chứng minh không leak
+trong nhiều ngày. Không gọi provider hoặc account thật.
+
+Để kiểm tra với provider thật, đăng nhập account
 rồi dùng Claude Code trong một thư mục thử nghiệm: yêu cầu đọc/sửa một file, chạy
 test, gọi subagent, đọc một ảnh, WebSearch và `/compact`, sau đó tiếp tục câu hỏi.
 Failover được kiểm tra bằng mock quota; không cần cố tiêu hết quota account thật.

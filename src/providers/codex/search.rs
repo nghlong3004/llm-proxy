@@ -16,8 +16,8 @@ pub fn query(request: &GenerationRequest) -> Option<String> {
         .messages
         .iter()
         .rev()
-        .filter(|m| m.role == Role::User)
-        .find_map(|message| {
+        .find(|m| m.role == Role::User)
+        .and_then(|message| {
             let text = message
                 .content
                 .iter()
@@ -32,8 +32,7 @@ pub fn query(request: &GenerationRequest) -> Option<String> {
                 .join("\n");
             let text = text
                 .trim()
-                .strip_prefix("Perform a web search for the query:")
-                .unwrap_or(text.trim())
+                .strip_prefix("Perform a web search for the query:")?
                 .trim();
             (!text.is_empty()).then(|| text.to_owned())
         })
@@ -72,10 +71,20 @@ pub fn events(
     query: &str,
     input_tokens: u64,
 ) -> Result<Vec<GenerationEvent>, ProxyError> {
+    json_retained_bytes(&response)?;
     let output = response
         .get("output")
         .and_then(Value::as_str)
         .ok_or_else(|| ProxyError::protocol("Search response has no output text"))?;
+    let mut bytes = 0;
+    reserve_output(
+        &mut bytes,
+        output
+            .len()
+            .saturating_add(query.len())
+            .saturating_add(request.model.len())
+            .saturating_add(1024),
+    )?;
     let mut results = vec![];
     let mut seen = std::collections::HashSet::new();
     if let Some(items) = response.get("results").and_then(Value::as_array) {
@@ -85,9 +94,12 @@ pub fn events(
                 .or_else(|| item.get("link"))
                 .and_then(Value::as_str);
             if let Some(url) = url.filter(|s| s.starts_with("https://") || s.starts_with("http://"))
-                && seen.insert(url.to_owned())
+                && !seen.contains(url)
             {
-                results.push(json!({"type":"web_search_result","url":url,"title":item.get("title").and_then(Value::as_str).unwrap_or(url),"encrypted_content":""}));
+                let title = item.get("title").and_then(Value::as_str).unwrap_or(url);
+                reserve_result(&mut bytes, results.len(), url, title)?;
+                seen.insert(url.to_owned());
+                results.push(json!({"type":"web_search_result","url":url,"title":title,"encrypted_content":""}));
             }
         }
     }
@@ -97,8 +109,10 @@ pub fn events(
             .split(')')
             .next()
             .filter(|s| s.starts_with("https://") || s.starts_with("http://"))
-            && seen.insert(url.to_owned())
+            && !seen.contains(url)
         {
+            reserve_result(&mut bytes, results.len(), url, url)?;
+            seen.insert(url.to_owned());
             results.push(
                 json!({"type":"web_search_result","url":url,"title":url,"encrypted_content":""}),
             );
@@ -124,7 +138,7 @@ pub fn events(
             index: 1,
             block: Content::HostedResult {
                 id,
-                results: json!(results),
+                results: Value::Array(results),
             },
         },
         GenerationEvent::BlockEnd { index: 1 },
@@ -148,4 +162,33 @@ pub fn events(
             reason: StopReason::EndTurn,
         },
     ])
+}
+
+fn reserve_result(
+    bytes: &mut usize,
+    count: usize,
+    url: &str,
+    title: &str,
+) -> Result<(), ProxyError> {
+    if count >= 4096 {
+        return Err(ProxyError::protocol("Too many search results"));
+    }
+    // Include retained JSON nodes, escaped output, and the URL deduplication copy.
+    reserve_output(
+        bytes,
+        url.len()
+            .saturating_add(title.len())
+            .saturating_mul(6)
+            .saturating_add(url.len())
+            .saturating_add(512),
+    )
+}
+
+fn reserve_output(bytes: &mut usize, additional: usize) -> Result<(), ProxyError> {
+    *bytes = bytes.saturating_add(additional);
+    if *bytes > MAX_GENERATED_BYTES {
+        Err(ProxyError::protocol("Search output exceeds 16 MiB"))
+    } else {
+        Ok(())
+    }
 }

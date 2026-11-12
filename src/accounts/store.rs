@@ -112,6 +112,15 @@ impl Store {
         validate_id(id)?;
         lock_file(&self.root.join("locks").join(format!("{id}.lock")))
     }
+    pub fn try_refresh_lock(&self, id: &str) -> Result<Option<File>> {
+        validate_id(id)?;
+        let file = private_open(&self.root.join("locks").join(format!("{id}.lock")))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
     fn credential_path(&self, id: &str, generation: &str) -> Result<PathBuf> {
         validate_id(id)?;
         validate_id(generation)?;
@@ -127,6 +136,7 @@ impl Store {
         }
         for account in &registry.accounts {
             validate_id(&account.id)?;
+            validate_id(&account.generation)?;
         }
         Ok(registry)
     }
@@ -221,7 +231,30 @@ impl Store {
             .identity_operations
             .insert(identity, ticket.sequence);
         self.save_registry(&registry)?;
+        // Publication succeeded: cleanup must not report a misleading login failure.
+        // A later login for this identity retries any obsolete files left by I/O failure.
+        if self
+            .cleanup_credentials(&account.id, Some(&account.generation))
+            .is_err()
+        {
+            tracing::warn!(account_id = %account.id, event = "obsolete_credentials_cleanup_failed");
+        }
         Ok(account)
+    }
+    fn cleanup_credentials(&self, id: &str, keep_generation: Option<&str>) -> Result<()> {
+        let directory = self.root.join("credentials");
+        let prefix = format!("{id}-");
+        let keep = keep_generation.map(|generation| format!("{id}-{generation}.json"));
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(&prefix) && keep.as_deref() != Some(name.as_ref()) {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        File::open(directory)?.sync_all()?;
+        Ok(())
     }
     pub fn remove(&self, id: &str) -> Result<()> {
         validate_id(id)?;
@@ -242,17 +275,7 @@ impl Store {
         registry.active.retain(|_, active| active != id);
         // Unpublish first; a late refresh must never resurrect a removed account.
         self.save_registry(&registry)?;
-        for entry in fs::read_dir(self.root.join("credentials"))? {
-            let entry = entry?;
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(&format!("{id}-"))
-            {
-                fs::remove_file(entry.path())?;
-            }
-        }
-        Ok(())
+        self.cleanup_credentials(id, None)
     }
     fn load_lease(&self, registry: &Registry, id: &str) -> Result<Lease> {
         let account = registry
@@ -277,6 +300,19 @@ impl Store {
     pub fn lease(&self, id: &str) -> Result<Lease> {
         let _guard = self.registry_lock()?;
         self.load_lease(&self.read_registry()?, id)
+    }
+    /// `None` means the selected account was removed or replaced, not corrupt storage.
+    pub fn lease_for_generation(&self, id: &str, generation: &str) -> Result<Option<Lease>> {
+        let _guard = self.registry_lock()?;
+        let registry = self.read_registry()?;
+        if !registry
+            .accounts
+            .iter()
+            .any(|account| account.id == id && account.generation == generation)
+        {
+            return Ok(None);
+        }
+        self.load_lease(&registry, id).map(Some)
     }
     pub fn select_at(
         &self,
@@ -437,13 +473,42 @@ impl Store {
         id: &str,
         generation: &str,
         rejected_access: &str,
-        mut refreshed: Credential,
+        refreshed: Credential,
     ) -> Result<Credential> {
+        self.finish_refresh_inner(id, generation, rejected_access, refreshed, false)?
+            .context("Account changed during refresh")
+    }
+    /// Publish a rotation only while the selected generation remains current.
+    pub fn finish_refresh_for_generation(
+        &self,
+        id: &str,
+        generation: &str,
+        rejected_access: &str,
+        refreshed: Credential,
+    ) -> Result<Option<Credential>> {
+        self.finish_refresh_inner(id, generation, rejected_access, refreshed, true)
+    }
+    fn finish_refresh_inner(
+        &self,
+        id: &str,
+        generation: &str,
+        rejected_access: &str,
+        mut refreshed: Credential,
+        require_generation: bool,
+    ) -> Result<Option<Credential>> {
         let _guard = self.registry_lock()?;
         let registry = self.read_registry()?;
+        if require_generation
+            && !registry
+                .accounts
+                .iter()
+                .any(|account| account.id == id && account.generation == generation)
+        {
+            return Ok(None);
+        }
         let current = self.load_lease(&registry, id)?.credential;
         if current.generation != generation || current.access_token != rejected_access {
-            return Ok(current);
+            return Ok(Some(current));
         }
         if current.subject != refreshed.subject || current.account_id != refreshed.account_id {
             bail!("Refreshed credential belongs to a different account");
@@ -453,7 +518,7 @@ impl Store {
             &self.credential_path(id, &refreshed.generation)?,
             &refreshed,
         )?;
-        Ok(refreshed)
+        Ok(Some(refreshed))
     }
     pub fn reasoning_key(&self) -> Result<[u8; 32]> {
         let _guard = self.registry_lock()?;

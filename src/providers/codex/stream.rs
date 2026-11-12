@@ -161,15 +161,15 @@ impl Translator {
         out: &mut Vec<GenerationEvent>,
     ) -> Result<(), ProxyError> {
         if let Some(full) = full {
-            let current = self.texts.get(&key).map(|s| s.text.as_str()).unwrap_or("");
-            if !full.starts_with(current) {
+            let current_len = self.texts.get(&key).map_or(0, |s| s.text.len());
+            if !full.starts_with(self.texts.get(&key).map_or("", |s| s.text.as_str())) {
                 return Err(ProxyError::protocol(
                     "Upstream text changed after being streamed",
                 ));
             }
-            let suffix = full[current.len()..].to_owned();
+            let suffix = &full[current_len..];
             if !suffix.is_empty() || !self.texts.contains_key(&key) {
-                self.text_delta(key, &suffix, out)?;
+                self.text_delta(key, suffix, out)?;
             }
         }
         if let Some(index) = self.texts.get(&key).map(|s| s.index) {
@@ -277,9 +277,9 @@ impl Translator {
                 "Reasoning summary changed after being streamed",
             ));
         }
-        let suffix = full[current.len()..].to_owned();
+        let suffix = &full[current.len()..];
         if !suffix.is_empty() {
-            self.thinking_delta(output, part, &suffix, out)?;
+            self.thinking_delta(output, part, suffix, out)?;
         }
         Ok(())
     }
@@ -306,6 +306,7 @@ impl Translator {
                         .and_then(Value::as_str)
                         .filter(|s| !s.is_empty())
                         .ok_or_else(|| ProxyError::protocol("Tool call has no name"))?;
+                    self.reserve(id.len().saturating_add(name.len()))?;
                     let index = self.block(
                         Content::ToolCall {
                             id: id.into(),
@@ -385,7 +386,7 @@ impl Translator {
             "web_search_call" if done => {
                 let id = item.get("id").and_then(Value::as_str).unwrap_or("search");
                 if !self.seen_searches.contains(id) {
-                    self.reserve(id.len())?;
+                    self.reserve(id.len().saturating_mul(2).saturating_add("srvtoolu_".len()))?;
                     self.seen_searches.insert(id.to_owned());
                     let id = format!(
                         "srvtoolu_{}",
@@ -396,7 +397,7 @@ impl Translator {
                         .or_else(|| item.pointer("/action/queries/0"))
                         .and_then(Value::as_str)
                         .unwrap_or("");
-                    self.reserve(id.len().saturating_add(query.len()))?;
+                    self.reserve(id.len().saturating_add(query.len()).saturating_add(512))?;
                     let index = self.block(
                         Content::HostedCall {
                             id: id.clone(),
@@ -429,6 +430,12 @@ impl Translator {
         }) {
             self.reserve(full.len())?;
         }
+        let state = self
+            .tools
+            .get(&output)
+            .ok_or_else(|| ProxyError::protocol("Tool argument event preceded its call"))?;
+        let args = full.filter(|_| !state.had_delta).unwrap_or(&state.args);
+        self.reserve(json_argument_bytes(args)?.saturating_sub(args.len()))?;
         let state = self
             .tools
             .get_mut(&output)
@@ -473,7 +480,7 @@ impl Translator {
                         .len()
                         .saturating_add(title.len())
                         .saturating_mul(6)
-                        .saturating_add(128);
+                        .saturating_add(512);
                     self.reserve(bytes.saturating_add(url.len()))?;
                     self.citation_bytes = self.citation_bytes.saturating_add(bytes);
                     self.seen_urls.insert(url.into());
@@ -514,7 +521,10 @@ impl Translator {
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
         match event.get("type").and_then(Value::as_str).unwrap_or("") {
-            "codex.rate_limits" => out.push(GenerationEvent::QuotaSnapshot(event.clone())),
+            "codex.rate_limits" => {
+                self.reserve(json_retained_bytes(event)?)?;
+                out.push(GenerationEvent::QuotaSnapshot(event.clone()));
+            }
             "response.created" | "response.in_progress" | "keepalive" => {
                 out.push(GenerationEvent::Ping)
             }
@@ -610,8 +620,12 @@ impl Translator {
                     self.item(output, &json!({"type":"reasoning"}), true, &mut out)?;
                 }
                 self.start(&mut out);
-                for id in self.searches.clone() {
-                    self.reserve(self.citation_bytes.saturating_add(id.len()))?;
+                for search_index in 0..self.searches.len() {
+                    self.reserve(
+                        self.citation_bytes
+                            .saturating_add(self.searches[search_index].len()),
+                    )?;
+                    let id = self.searches[search_index].clone();
                     let index = self.block(
                         Content::HostedResult {
                             id,

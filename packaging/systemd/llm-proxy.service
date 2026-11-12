@@ -10,7 +10,8 @@ Restart=on-failure
 RestartSec=3
 # The proxy currently handles Ctrl+C for cancellation and log flushing.
 KillSignal=SIGINT
-TimeoutStopSec=15
+# Allow the 30s OAuth timeout plus guarded token persistence during shutdown.
+TimeoutStopSec=45
 UMask=0077
 
 [Install]

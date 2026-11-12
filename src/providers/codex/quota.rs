@@ -11,8 +11,9 @@ pub fn classify(status: u16, body: &Value, headers: &HeaderMap, now: u64) -> Opt
         .unwrap_or(body);
     let code = error
         .get("code")
-        .or_else(|| error.get("type"))
         .and_then(Value::as_str)
+        .filter(|code| !code.is_empty())
+        .or_else(|| error.get("type").and_then(Value::as_str))
         .unwrap_or("");
     let rate_limits = body.get("rate_limits");
     let explicit_limit = event == "codex.rate_limits"

@@ -1,5 +1,5 @@
 //! Account policy and provider Strategy dispatch, shared by all protocol adapters.
-use super::AppState;
+use super::{AdmissionPermit, AppState};
 use crate::{
     accounts::{Account, now},
     domain::error::{FailureKind, ProxyError},
@@ -12,8 +12,11 @@ pub fn generate(
     state: AppState,
     request: Arc<GenerationRequest>,
     context: RequestContext,
+    first_account: Account,
+    permit: AdmissionPermit,
 ) -> EventStream {
     Box::pin(async_stream::stream! {
+        let mut first_account = Some(first_account);
         let mut excluded = HashSet::new();
         let mut committed = false;
         let mut shutdown = state.shutdown.subscribe();
@@ -23,17 +26,22 @@ pub fn generate(
                 yield Err(shutdown_error());
                 return;
             }
-            let store = state.store.clone();
-            let skip = excluded.clone();
-            let provider_name = state.config.default_provider.clone();
-            let lease = match tokio::task::spawn_blocking(move || {
-                store.select_for_provider_at(&provider_name, &skip, now())
-            }).await {
-                Ok(Ok(lease)) => lease,
-                Ok(Err(error)) => { yield Err(error.into()); return; }
-                Err(_) => { yield Err(ProxyError::storage()); return; }
+            let account = if let Some(account) = first_account.take() {
+                account
+            } else {
+                let store = state.store.clone();
+                let skip = excluded.clone();
+                let provider_name = state.config.default_provider.clone();
+                let preparation_permit = permit.clone();
+                match tokio::task::spawn_blocking(move || {
+                    let _permit = preparation_permit;
+                    store.select_for_provider_at(&provider_name, &skip, now())
+                }).await {
+                    Ok(Ok(lease)) => lease.account,
+                    Ok(Err(error)) => { yield Err(error.into()); return; }
+                    Err(_) => { yield Err(ProxyError::storage()); return; }
+                }
             };
-            let account = lease.account;
             excluded.insert(account.id.clone());
             let provider = match state.providers.get(&state.config.default_provider) {
                 Ok(provider) => provider,
@@ -57,7 +65,7 @@ pub fn generate(
                     if error.kind == FailureKind::AccountChanged {
                         excluded.remove(&account.id);
                     }
-                    match handle_failure(&state, &account, &error, committed, &context.request_id).await {
+                    match handle_failure(&state, &account, &error, committed, &context.request_id, permit.clone()).await {
                         Ok(true) => continue,
                         Ok(false) => yield Err(error),
                         Err(storage) => yield Err(storage),
@@ -76,7 +84,9 @@ pub fn generate(
                         let store = state.store.clone();
                         let id = account.id.clone();
                         let generation = account.generation.clone();
+                        let preparation_permit = permit.clone();
                         let saved = tokio::task::spawn_blocking(move || {
+                            let _permit = preparation_permit;
                             store.record_usage(&id, &generation, usage)
                         }).await;
                         if !matches!(saved, Ok(Ok(()))) {
@@ -93,7 +103,7 @@ pub fn generate(
                         if finished { return; }
                     }
                     Some(Err(error)) => {
-                        match handle_failure(&state, &account, &error, committed, &context.request_id).await {
+                        match handle_failure(&state, &account, &error, committed, &context.request_id, permit.clone()).await {
                             Ok(true) => retry = true,
                             Ok(false) => yield Err(error),
                             Err(storage) => yield Err(storage),
@@ -120,21 +130,28 @@ async fn handle_failure(
     error: &ProxyError,
     committed: bool,
     request_id: &str,
+    permit: AdmissionPermit,
 ) -> Result<bool, ProxyError> {
     let store = state.store.clone();
     let id = account.id.clone();
     let generation = account.generation.clone();
     let retry = if let Some(reset) = error.quota_reset() {
-        tokio::task::spawn_blocking(move || store.mark_quota_at(&id, &generation, reset, now()))
-            .await
-            .map_err(|_| ProxyError::storage())?
-            .map_err(|_| ProxyError::storage())?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            store.mark_quota_at(&id, &generation, reset, now())
+        })
+        .await
+        .map_err(|_| ProxyError::storage())?
+        .map_err(|_| ProxyError::storage())?;
         true
     } else if error.kind == FailureKind::Authentication {
-        tokio::task::spawn_blocking(move || store.mark_needs_login(&id, &generation))
-            .await
-            .map_err(|_| ProxyError::storage())?
-            .map_err(|_| ProxyError::storage())?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            store.mark_needs_login(&id, &generation)
+        })
+        .await
+        .map_err(|_| ProxyError::storage())?
+        .map_err(|_| ProxyError::storage())?;
         true
     } else {
         error.kind == FailureKind::AccountChanged

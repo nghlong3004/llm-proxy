@@ -19,6 +19,7 @@ pub struct Codex {
     auth: AuthClient,
     http: reqwest::Client,
     signer: ReasoningSigner,
+    preparation: Arc<tokio::sync::Semaphore>,
 }
 impl Codex {
     pub fn new(store: Store, config: Arc<Config>) -> anyhow::Result<Self> {
@@ -38,6 +39,7 @@ impl Codex {
             auth,
             http,
             signer,
+            preparation: Arc::new(tokio::sync::Semaphore::new(32)),
         })
     }
     async fn send(
@@ -68,19 +70,31 @@ impl Codex {
             .config
             .resolve(&request.model)
             .map_err(|e| ProxyError::invalid(e.to_string()).with_code("unknown_model"))?;
+        let preparation = self.preparation.clone().try_acquire_owned().map_err(|_| {
+            ProxyError::new(
+                503,
+                FailureKind::Upstream,
+                "Token preparation capacity reached",
+            )
+            .with_code("token_preparation_capacity")
+        })?;
+        let count_request = request.clone();
+        let estimated = tokio::task::spawn_blocking(move || {
+            // Provider futures may be dropped while an uncancellable blocking job runs.
+            let _permit = preparation;
+            request::estimate_tokens(&count_request)
+        })
+        .await
+        .map_err(|_| ProxyError::protocol("Token estimator failed"))?;
+        // Validate the selected login after async preparation, before any upstream dispatch.
         let mut credential = self
             .auth
-            .refresh(&self.store, &account.id, None)
+            .refresh_for_generation(&self.store, &account.id, &account.generation, None)
             .await
             .map_err(auth_error)?;
         if credential.generation != account.generation {
             return Err(account_changed());
         }
-        let count_request = request.clone();
-        let estimated =
-            tokio::task::spawn_blocking(move || request::estimate_tokens(&count_request))
-                .await
-                .map_err(|_| ProxyError::protocol("Token estimator failed"))?;
         let query = search::query(&request);
         let body = if let Some(query) = &query {
             search::request_body(&request, &model.id, context.session_id.as_deref(), query)
@@ -128,7 +142,12 @@ impl Codex {
             drop(response);
             credential = self
                 .auth
-                .refresh(&self.store, &account.id, Some(&credential.access_token))
+                .refresh_for_generation(
+                    &self.store,
+                    &account.id,
+                    &account.generation,
+                    Some(&credential.access_token),
+                )
                 .await
                 .map_err(auth_error)?;
             if credential.generation != account.generation {
@@ -206,6 +225,9 @@ impl Provider for Codex {
     fn name(&self) -> &'static str {
         "codex"
     }
+    fn shutdown(&self) -> BoxFuture<'_, ()> {
+        Box::pin(self.auth.shutdown())
+    }
     fn generate(
         &self,
         request: Arc<GenerationRequest>,
@@ -218,6 +240,8 @@ impl Provider for Codex {
 }
 fn auth_error(error: RefreshError) -> ProxyError {
     match error {
+        RefreshError::AccountChanged => account_changed(),
+        RefreshError::Storage(_) => ProxyError::storage(),
         RefreshError::Revoked => ProxyError::new(
             401,
             FailureKind::Authentication,
@@ -326,4 +350,100 @@ pub async fn read_bounded(
         out.extend_from_slice(&bytes);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::ProtocolAdapter;
+
+    fn fixture() -> (tempfile::TempDir, Codex, Account) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let account = store
+            .login(
+                "synthetic",
+                Credential {
+                    access_token: "synthetic-access".into(),
+                    refresh_token: "synthetic-refresh".into(),
+                    id_token: None,
+                    expires_at: u64::MAX,
+                    subject: "synthetic-subject".into(),
+                    account_id: "synthetic-workspace".into(),
+                    generation: String::new(),
+                },
+            )
+            .unwrap();
+        let config = Arc::new(Config {
+            default_model: Some("gpt-5.5".into()),
+            codex_endpoint: "http://127.0.0.1:1/responses".into(),
+            ..Default::default()
+        });
+        let auth = AuthClient::with_issuer("http://127.0.0.1:1".into()).unwrap();
+        (
+            directory,
+            Codex::with_auth(store, config, auth).unwrap(),
+            account,
+        )
+    }
+    fn request() -> Arc<GenerationRequest> {
+        Arc::new(
+            crate::protocols::anthropic::Anthropic
+                .decode(serde_json::json!({
+                    "model": "sonnet", "messages": [{"role":"user", "content":"synthetic"}],
+                }))
+                .unwrap(),
+        )
+    }
+    fn context() -> RequestContext {
+        RequestContext {
+            request_id: "synthetic".into(),
+            session_id: None,
+        }
+    }
+    #[tokio::test]
+    async fn provider_preparation_capacity_rejects_without_network_dispatch() {
+        let (_directory, provider, account) = fixture();
+        let _held = provider
+            .preparation
+            .clone()
+            .acquire_many_owned(32)
+            .await
+            .unwrap();
+        let result = provider.start(request(), account, context()).await;
+        assert!(matches!(result, Err(error) if error.code == "token_preparation_capacity"));
+    }
+    #[test]
+    fn cancelled_provider_keeps_capacity_until_tokenizer_finishes() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (_directory, provider, account) = fixture();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            started_rx.await.unwrap();
+            let mut pending = Box::pin(provider.clone().start(request(), account, context()));
+            assert!(futures_util::poll!(pending.as_mut()).is_pending());
+            drop(pending);
+            let retained = provider.preparation.available_permits();
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            assert_eq!(retained, 31);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while provider.preparation.available_permits() != 32 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+    }
 }

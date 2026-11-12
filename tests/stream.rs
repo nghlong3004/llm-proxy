@@ -201,6 +201,36 @@ fn streamed_refusal_is_preserved_once() {
     assert!(matches!(&a.finish().unwrap().content[0],Content::Text(text) if text=="Cannot help"));
 }
 #[test]
+fn initial_tool_names_and_ids_share_the_global_output_budget() {
+    for field in ["name", "call_id"] {
+        let mut t = translator();
+        let large = "x".repeat(6 * 1024 * 1024);
+        for index in 0..3 {
+            let mut item = json!({"type":"function_call","call_id":"c","name":"Read"});
+            item[field] = json!(large);
+            let event =
+                json!({"type":"response.output_item.added","output_index":index,"item":item});
+            assert!(serde_json::to_vec(&event).unwrap().len() < 8 * 1024 * 1024);
+            assert_eq!(
+                t.accept(&event).is_err(),
+                index == 2,
+                "field {field}, item {index}"
+            );
+        }
+    }
+}
+
+#[test]
+fn deltas_cannot_bypass_budget_consumed_by_initial_tool_metadata() {
+    let mut t = translator();
+    let name = "x".repeat(6 * 1024 * 1024);
+    for index in 0..2 {
+        t.accept(&json!({"type":"response.output_item.added","output_index":index,"item":{"type":"function_call","call_id":"c","name":name}})).unwrap();
+    }
+    assert!(t.accept(&json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"x".repeat(5 * 1024 * 1024)})).is_err());
+}
+
+#[test]
 fn citation_storage_and_repeated_hosted_result_copies_are_bounded() {
     let mut t = translator();
     let long_url = format!("https://example.com/{}", "x".repeat(256 * 1024));

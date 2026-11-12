@@ -21,7 +21,7 @@ fn resource_commands_and_flags_match_documented_convention() {
         ),
         (
             vec!["serve", "--help"],
-            vec!["--default-model", "--listen-port"],
+            vec!["--default-model", "--listen-port", "--listen-address"],
         ),
     ] {
         let output = cli(&args);
@@ -31,6 +31,22 @@ fn resource_commands_and_flags_match_documented_convention() {
             assert!(text.contains(flag), "missing {flag}: {text}");
         }
     }
+}
+
+#[test]
+fn invalid_listen_addresses_are_rejected_before_opening_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("unused-state");
+    let output = cli(&[
+        "--state-dir",
+        state.to_str().unwrap(),
+        "serve",
+        "--listen-address",
+        "not-an-ip",
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--listen-address"));
+    assert!(!state.exists());
 }
 
 #[test]

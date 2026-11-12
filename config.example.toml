@@ -2,6 +2,8 @@
 # Choose a model your ChatGPT account can access. This catalog is not an entitlement check.
 default_provider = "codex"
 default_model = "gpt-6.1-sol"
+# Keep loopback on the host; Docker explicitly overrides this inside the container.
+listen_address = "127.0.0.1"
 listen_port = 18765
 # Metadata only; no prompts, tool arguments or credentials.
 log_level = "info"

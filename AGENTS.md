@@ -1,69 +1,107 @@
-# Hướng dẫn làm việc với llm-proxy
+# LLM Proxy
 
-## Đọc trước khi sửa code
+## Context Continuity
 
-1. `docs/implementation-progress.md`: trạng thái hiện tại, kiểm tra đã chạy,
-   quyết định và công việc tiếp theo. Đây là context tiếp nối công việc.
-2. `docs/architecture.md`: luồng dữ liệu, trách nhiệm từng thư mục và invariants.
-3. `docs/superpowers/plans/2026-11-12-llm-proxy-v1.md`: kế hoạch v1 đã thống nhất.
+Use the `project-context` skill when resuming previous work,
+creating milestone checkpoints, or preparing a session handoff.
+If the harness does not expose that skill, read
+`.agents/skills/project-context/SKILL.md` directly and follow its checklist.
 
-Sau mỗi mốc triển khai hoặc thay đổi quyết định, cập nhật file tiến độ ngay.
-Không đánh dấu hoàn tất nếu mới viết code mà chưa chạy kiểm tra tương ứng.
-Khi đổi cấu trúc thư mục/giao diện, sửa tài liệu kiến trúc và hướng dẫn dùng.
+Keep `docs/implementation-progress.md` current after each milestone
+or material decision, even if the skill is not activated.
 
-## Mục tiêu đã chốt
+Never rely solely on conversation history for project state.
 
-- Rust stable mới nhất, edition 2024; dependency stable mới nhất, commit Cargo.lock.
-- Proxy độc lập, chạy localhost, quản lý qua CLI, backend Codex subscription.
-- Nhiều account: giữ account hiện tại đến khi hết quota rồi dùng account kế tiếp.
-- Thêm/xóa account trong khi server chạy, áp dụng cho request kế tiếp.
-- Mốc tương thích Claude Code tham khảo raine/claude-code-proxy: tool, ảnh,
-  reasoning, structured output, SSE, WebSearch và compact portable.
-- Không thực thi tool trong proxy; Claude Code sở hữu file, terminal và agent loop.
+## 1. Workflow
 
-## Bố cục và cách viết Rust
+Before modifying code, read in order:
 
-- `main.rs`: entrypoint; `cli/`: parse lệnh và wiring, không chứa nghiệp vụ.
-- `domain/`: hợp đồng request/event/lỗi trung lập và accumulator non-streaming.
-- `protocols/`: Adapter giao thức agent; Anthropic schema/SSE/error chỉ ở đây.
-- `providers/`: Strategy `Provider`, registry và implementation `codex/`.
-- `accounts/`: định danh, lưu trữ, chọn account; không biết schema Anthropic.
-- `authentication/`: OAuth, refresh token; không đọc/ghi credential Codex CLI.
-- `providers/codex/`: translator, search, reasoning, SSE decoder và upstream client.
-- `server/`: HTTP routes, điều phối request, cancellation và failover.
-- `logging/`: metadata JSONL, hàng đợi nền có giới hạn và xoay file.
-- `config.rs`: TOML, model registry/alias và endpoint.
-- `tests/`: kiểm thử theo hành vi, dùng account/upstream giả, không tiêu quota thật.
+1. `docs/implementation-progress.md` — current state, verified work, decisions, next steps. Use as the continuity source.
+2. `docs/architecture.md` — architecture, module boundaries, data flow, invariants.
+3. `docs/superpowers/plans/2026-11-12-llm-proxy-v1.md` — approved v1 implementation plan.
 
-Ưu tiên enum và Result có ý nghĩa; tránh unwrap/expect ngoài test. Hàm nhỏ theo
-trách nhiệm; chỉ thêm trait/abstraction khi có nhu cầu thật. Giữ CPU/file-lock I/O
-ra khỏi Tokio worker bằng spawn_blocking; không giữ khóa registry qua network await.
-Quy ước lệnh/thư mục: đọc `docs/conventions.md`.
-Dùng hai skill rust-best-practices và rust-async-patterns khi viết/review Rust.
+Rules:
+- Follow the approved architecture and plan. Do not silently change established decisions.
+- Update `implementation-progress.md` immediately after each milestone or decision change, recording results, blockers, and next steps.
+- Never mark work complete without running its relevant checks.
+- Update architecture and usage docs when changing interfaces, commands, or project structure.
+- Read `docs/conventions.md` for command and directory conventions.
+- Use `rust-best-practices` and `rust-async-patterns` skills when implementing or reviewing Rust.
 
-## Invariants bắt buộc
+## 2. Product Requirements
 
-- Credential riêng tư: thư mục 0700, file 0600, atomic replace + khóa liên tiến trình.
-- Login/refresh cũ không được ghi đè lần login mới hoặc hồi sinh account đã xóa.
-- Phân biệt user và workspace: hai người cùng workspace là hai account riêng.
-- Không chuyển account chỉ vì generic 429, lỗi model/quyền hoặc lỗi mạng.
-- Không tự replay sau message/content event hoặc khi không chắc request đã xử lý.
-- Reasoning mã hóa chỉ replay khi chứng minh đúng account, generation và model.
-- Không log prompt, token, OAuth code hay reasoning mã hóa; không commit credential.
-- Upstream body/request có giới hạn; disconnect phải giải phóng upstream và permit.
-- Incoming ANTHROPIC_AUTH_TOKEN không phải credential Codex và không forward lên mạng.
+- Latest stable Rust, edition 2024; latest compatible stable dependencies; commit `Cargo.lock`.
+- Standalone localhost proxy, CLI-managed, backed by Codex subscription accounts.
+- Support multiple accounts. Keep the active account until confirmed quota exhaustion, then switch to the next eligible account.
+- Support adding/removing accounts at runtime; changes affect subsequent requests.
+- Target Claude Code compatibility using `raine/claude-code-proxy` as reference: tools, images, reasoning, structured output, SSE, WebSearch, portable compaction.
+- Never execute agent tools inside the proxy. Claude Code owns filesystem operations, terminal execution, and the agent loop.
 
-## Kiểm tra trước khi báo hoàn tất
+## 3. Architecture Boundaries
 
-```sh
+| Module | Responsibility |
+|---|---|
+| `main.rs` | Entrypoint only |
+| `cli/` | Command parsing and wiring; no business logic |
+| `domain/` | Protocol-neutral requests, events, errors, non-streaming accumulator |
+| `protocols/` | Agent protocol adapters; Anthropic schemas, SSE, errors |
+| `providers/` | `Provider` strategy, registry, implementations |
+| `providers/codex/` | Translation, search, reasoning, SSE decoding, upstream client |
+| `accounts/` | Identity, storage, selection; Anthropic-agnostic |
+| `authentication/` | OAuth and token refresh; independent of Codex CLI credentials |
+| `server/` | HTTP routing, orchestration, cancellation, failover |
+| `logging/` | Metadata-only JSONL, bounded background queue, rotation |
+| `config.rs` | TOML, model registry/aliases, endpoints |
+| `tests/` | Behavioral tests using fake accounts/upstreams; no real quota consumption |
+
+Keep responsibilities isolated. Avoid cross-layer protocol leakage.
+
+## 4. Mandatory Invariants
+
+### Security
+- Credential directories: `0700`; files: `0600`. Use atomic replacement and cross-process locking.
+- Stale login/refresh operations must never overwrite newer credentials or resurrect deleted accounts.
+- Account identity must distinguish users within the same workspace.
+- Never log prompts, tokens, OAuth codes, or encrypted reasoning. Never commit credentials.
+- Never forward incoming `ANTHROPIC_AUTH_TOKEN` upstream as a Codex credential.
+- Bound upstream request/body sizes.
+- Listener has no client authentication: keep native defaults and Docker host publication on loopback. Bind wildcard only explicitly inside isolated containers; never import host credentials into images.
+
+### Routing and Recovery
+- Quota failover requires confirmed exhaustion, never generic HTTP 429, model/permission errors, or network failures alone. Before output, definite credential rejection or an account removed/changed before dispatch may also trigger safe reselection; do not classify unrelated storage/network errors as account changes.
+- Never automatically replay after a message/content event or when upstream processing status is uncertain.
+- Replay encrypted reasoning only when account, generation, and model identity are verified.
+- Client disconnect must cancel/release inference work and concurrency permits; retain permits until outstanding blocking jobs complete. Dispatched OAuth refresh transactions are the exception: finish guarded persistence independently of the client and drain on graceful shutdown.
+- Account mutations must not corrupt in-flight request state.
+
+### Rust and Async
+- Prefer meaningful enums and `Result`; avoid `unwrap`/`expect` outside tests.
+- Keep functions focused; introduce traits/abstractions only for concrete needs.
+- Offload CPU-intensive and blocking filesystem/lock operations using `spawn_blocking`.
+- Never hold registry locks across network `.await` calls.
+- Prefer explicit errors and deterministic behavior over implicit fallbacks.
+
+## 5. Verification Gate
+
+Before reporting implementation complete, run:
+
+```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --locked -- --include-ignored
 cargo build --release --locked
 ```
 
-Nếu môi trường có mạng bị hạn chế, dùng Cargo cache đã tải và --offline. Ghi rõ
-kiểm tra nào bị chặn, kiểm tra nào đã pass. Không giả là đã kiểm tra Claude Code
-thật nếu mới chạy mock; không đọc credential hiện có để tự chạy phiên thật.
+- If networking is restricted, reuse cached dependencies with `--offline`.
+- Report each check as passed, failed, or blocked with its actual result.
+- Distinguish mock verification from real Claude Code integration testing.
+- Never inspect existing credentials or run live authenticated tests without explicit authorization.
+- Do not claim success based solely on code changes.
+- Docker changes additionally require an image build and isolated Compose smoke (non-root, private persistent state, loopback publication, SIGINT shutdown). Use a unique project, disposable synthetic state and random host port; do not alter an existing user service.
 
-Không tự publish/push/deploy. Giữ MIT attribution và nguồn tham khảo khi port code.
+## 6. Constraints
+
+- Do not publish, push, or deploy without explicit authorization.
+- Preserve MIT attribution and reference sources when porting code.
+- Prefer minimal, targeted changes over unrelated refactoring.
+- When requirements conflict or a critical assumption is uncertain, explain the trade-off before making irreversible changes.

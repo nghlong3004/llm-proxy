@@ -1,6 +1,6 @@
 //! Schema compatibility rules ported from raine/claude-code-proxy (MIT).
 //! Source: fe107180f7a69c6d63dd4421a6567cf641c1f103, translate/request.rs.
-//! Copyright (c) 2026 Raine Virta; license retained in THIRD_PARTY_NOTICES.md.
+//! Copyright (c) 2026 Raine Virta; license retained in LICENSE.
 use serde_json::Value;
 
 pub(super) fn strip_tool_schema_patterns(schema: &mut Value) {

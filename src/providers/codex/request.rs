@@ -1,5 +1,5 @@
 //! Shared generation request → Codex Responses wire format.
-//! Protocol rules follow raine/claude-code-proxy; see THIRD_PARTY_NOTICES.md.
+//! Protocol rules follow raine/claude-code-proxy; see LICENSE and schema.rs.
 use super::{
     reasoning::ReasoningSigner,
     schema::{normalize_strict_json_schema, strip_tool_schema_patterns},
