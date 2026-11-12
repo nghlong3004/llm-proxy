@@ -1,0 +1,24 @@
+# Copy to $XDG_STATE_HOME/llm-proxy/config.toml (normally ~/.local/state/llm-proxy).
+# Choose a model your ChatGPT account can access. This catalog is not an entitlement check.
+default_provider = "codex"
+default_model = "gpt-6.1-sol"
+listen_port = 18765
+# Metadata only; no prompts, tool arguments or credentials.
+log_level = "info"
+
+# Unmapped Claude aliases all use default_model. Override individual aliases here.
+[aliases]
+# haiku = "gpt-6-luna"
+# sonnet = "gpt-6.1-sol"
+# opus = "gpt-6-astra"
+
+# gpt-5.6 / gpt-6 families default to Responses Lite. Select the full lane to allow
+# parallel tools for models/accounts that support it. Explicit client restrictions
+# on parallel tools still apply. Hosted automatic search uses the full search lane.
+[models."gpt-6.1-sol"]
+responses_lite = false
+
+# Register an additional account-supported model without changing source:
+# [models."another-model-id"]
+# responses_lite = false
+# search_model = "another-model-with-search"

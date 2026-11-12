@@ -1,0 +1,17 @@
+[Unit]
+Description=Local LLM proxy for coding agents
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/llm-proxy serve --default-model gpt-6.1-sol
+Restart=on-failure
+RestartSec=3
+# The proxy currently handles Ctrl+C for cancellation and log flushing.
+KillSignal=SIGINT
+TimeoutStopSec=15
+UMask=0077
+
+[Install]
+WantedBy=default.target

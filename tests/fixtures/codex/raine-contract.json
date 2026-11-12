@@ -1,0 +1,871 @@
+[
+  {
+    "expected": {
+      "client_metadata": {
+        "ws_request_header_x_openai_internal_codex_responses_lite": "true"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "role": "developer",
+          "tools": [
+            {
+              "description": "synthetic tool",
+              "name": "Bash",
+              "parameters": {
+                "$defs": {
+                  "pattern": {
+                    "type": "string"
+                  }
+                },
+                "examples": [
+                  {
+                    "pattern": "keep literal"
+                  }
+                ],
+                "properties": {
+                  "nested": {
+                    "items": {
+                      "properties": {
+                        "value": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "pattern": {
+                    "default": "literal pattern",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            }
+          ],
+          "type": "additional_tools"
+        },
+        {
+          "content": [
+            {
+              "text": "synthetic coding instructions",
+              "type": "input_text"
+            }
+          ],
+          "role": "developer",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "synthetic task",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "synthetic in-turn instruction",
+              "type": "input_text"
+            }
+          ],
+          "role": "developer",
+          "type": "message"
+        }
+      ],
+      "model": "gpt-6.1-sol",
+      "parallel_tool_calls": false,
+      "prompt_cache_key": "contract-session",
+      "reasoning": {
+        "context": "all_turns",
+        "effort": "medium",
+        "summary": "auto"
+      },
+      "store": false,
+      "stream": true,
+      "text": {
+        "verbosity": "low"
+      }
+    },
+    "expected_headers": {
+      "accept": "text/event-stream",
+      "authorization": "Bearer mock-access",
+      "chatgpt-account-id": "mock-workspace",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      "originator": "codex_cli_rs",
+      "session-id": "contract-session",
+      "user-agent": "codex_cli_rs",
+      "x-client-request-id": "contract-session",
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-codex-window-id": "contract-session:0",
+      "x-openai-internal-codex-responses-lite": "true"
+    },
+    "input": {
+      "messages": [
+        {
+          "content": "synthetic task",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "synthetic in-turn instruction",
+              "type": "text"
+            }
+          ],
+          "role": "system"
+        }
+      ],
+      "model": "sonnet",
+      "output_config": {
+        "effort": "medium"
+      },
+      "system": "synthetic coding instructions",
+      "tools": [
+        {
+          "description": "synthetic tool",
+          "input_schema": {
+            "$defs": {
+              "pattern": {
+                "pattern": "look(?=ahead)",
+                "type": "string"
+              }
+            },
+            "examples": [
+              {
+                "pattern": "keep literal"
+              }
+            ],
+            "properties": {
+              "nested": {
+                "items": {
+                  "properties": {
+                    "value": {
+                      "pattern": "a(?=b)",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "path": {
+                "pattern": "(?=.)path",
+                "type": "string"
+              },
+              "pattern": {
+                "default": "literal pattern",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": "Bash"
+        }
+      ]
+    },
+    "lite": true,
+    "model": "gpt-6.1-sol",
+    "name": "gpt-6.1-sol-medium-tool-schema"
+  },
+  {
+    "expected": {
+      "client_metadata": {
+        "ws_request_header_x_openai_internal_codex_responses_lite": "true"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "role": "developer",
+          "tools": [
+            {
+              "description": "synthetic tool",
+              "name": "Bash",
+              "parameters": {
+                "$defs": {
+                  "pattern": {
+                    "type": "string"
+                  }
+                },
+                "examples": [
+                  {
+                    "pattern": "keep literal"
+                  }
+                ],
+                "properties": {
+                  "nested": {
+                    "items": {
+                      "properties": {
+                        "value": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "pattern": {
+                    "default": "literal pattern",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            }
+          ],
+          "type": "additional_tools"
+        },
+        {
+          "content": [
+            {
+              "text": "synthetic coding instructions",
+              "type": "input_text"
+            }
+          ],
+          "role": "developer",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "synthetic task",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "synthetic in-turn instruction",
+              "type": "input_text"
+            }
+          ],
+          "role": "developer",
+          "type": "message"
+        }
+      ],
+      "model": "gpt-6.1-sol",
+      "parallel_tool_calls": false,
+      "prompt_cache_key": "contract-session",
+      "reasoning": {
+        "context": "all_turns",
+        "effort": "high",
+        "summary": "auto"
+      },
+      "store": false,
+      "stream": true,
+      "text": {
+        "verbosity": "low"
+      }
+    },
+    "expected_headers": {
+      "accept": "text/event-stream",
+      "authorization": "Bearer mock-access",
+      "chatgpt-account-id": "mock-workspace",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      "originator": "codex_cli_rs",
+      "session-id": "contract-session",
+      "user-agent": "codex_cli_rs",
+      "x-client-request-id": "contract-session",
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-codex-window-id": "contract-session:0",
+      "x-openai-internal-codex-responses-lite": "true"
+    },
+    "input": {
+      "messages": [
+        {
+          "content": "synthetic task",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "synthetic in-turn instruction",
+              "type": "text"
+            }
+          ],
+          "role": "system"
+        }
+      ],
+      "model": "sonnet",
+      "output_config": {
+        "effort": "high"
+      },
+      "system": "synthetic coding instructions",
+      "tools": [
+        {
+          "description": "synthetic tool",
+          "input_schema": {
+            "$defs": {
+              "pattern": {
+                "pattern": "look(?=ahead)",
+                "type": "string"
+              }
+            },
+            "examples": [
+              {
+                "pattern": "keep literal"
+              }
+            ],
+            "properties": {
+              "nested": {
+                "items": {
+                  "properties": {
+                    "value": {
+                      "pattern": "a(?=b)",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "path": {
+                "pattern": "(?=.)path",
+                "type": "string"
+              },
+              "pattern": {
+                "default": "literal pattern",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": "Bash"
+        }
+      ]
+    },
+    "lite": true,
+    "model": "gpt-6.1-sol",
+    "name": "gpt-6.1-sol-high-tool-schema"
+  },
+  {
+    "expected": {
+      "client_metadata": {
+        "ws_request_header_x_openai_internal_codex_responses_lite": "true"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "content": [
+            {
+              "text": "synthetic output",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "model": "gpt-6.1-sol",
+      "parallel_tool_calls": false,
+      "prompt_cache_key": "contract-session",
+      "reasoning": {
+        "context": "all_turns",
+        "effort": "high",
+        "summary": "auto"
+      },
+      "store": false,
+      "stream": true,
+      "text": {
+        "format": {
+          "name": "response",
+          "schema": {
+            "additionalProperties": false,
+            "properties": {
+              "answer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "answer"
+            ],
+            "type": "object"
+          },
+          "strict": true,
+          "type": "json_schema"
+        },
+        "verbosity": "low"
+      }
+    },
+    "expected_headers": {
+      "accept": "text/event-stream",
+      "authorization": "Bearer mock-access",
+      "chatgpt-account-id": "mock-workspace",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      "originator": "codex_cli_rs",
+      "session-id": "contract-session",
+      "user-agent": "codex_cli_rs",
+      "x-client-request-id": "contract-session",
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-codex-window-id": "contract-session:0",
+      "x-openai-internal-codex-responses-lite": "true"
+    },
+    "input": {
+      "messages": [
+        {
+          "content": "synthetic output",
+          "role": "user"
+        }
+      ],
+      "model": "sonnet",
+      "output_config": {
+        "effort": "high",
+        "format": {
+          "schema": {
+            "additionalProperties": false,
+            "properties": {
+              "answer": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "json_schema"
+        }
+      }
+    },
+    "lite": true,
+    "model": "gpt-6.1-sol",
+    "name": "gpt-6.1-sol-structured-output"
+  },
+  {
+    "expected": {
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "content": [
+            {
+              "text": "synthetic task",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "synthetic in-turn instruction",
+              "type": "input_text"
+            }
+          ],
+          "role": "developer",
+          "type": "message"
+        }
+      ],
+      "instructions": "synthetic coding instructions",
+      "model": "gpt-5.5",
+      "parallel_tool_calls": true,
+      "prompt_cache_key": "contract-session",
+      "reasoning": {
+        "effort": "medium",
+        "summary": "auto"
+      },
+      "store": false,
+      "stream": true,
+      "text": {
+        "verbosity": "low"
+      },
+      "tools": [
+        {
+          "description": "synthetic tool",
+          "name": "Bash",
+          "parameters": {
+            "$defs": {
+              "pattern": {
+                "type": "string"
+              }
+            },
+            "examples": [
+              {
+                "pattern": "keep literal"
+              }
+            ],
+            "properties": {
+              "nested": {
+                "items": {
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "path": {
+                "type": "string"
+              },
+              "pattern": {
+                "default": "literal pattern",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        }
+      ]
+    },
+    "expected_headers": {
+      "accept": "text/event-stream",
+      "authorization": "Bearer mock-access",
+      "chatgpt-account-id": "mock-workspace",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      "originator": "claude-code-proxy",
+      "session-id": "contract-session",
+      "user-agent": "claude-code-proxy/0.1.48",
+      "x-client-request-id": "contract-session",
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-codex-window-id": "contract-session:0"
+    },
+    "input": {
+      "messages": [
+        {
+          "content": "synthetic task",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "synthetic in-turn instruction",
+              "type": "text"
+            }
+          ],
+          "role": "system"
+        }
+      ],
+      "model": "sonnet",
+      "output_config": {
+        "effort": "medium"
+      },
+      "system": "synthetic coding instructions",
+      "tools": [
+        {
+          "description": "synthetic tool",
+          "input_schema": {
+            "$defs": {
+              "pattern": {
+                "pattern": "look(?=ahead)",
+                "type": "string"
+              }
+            },
+            "examples": [
+              {
+                "pattern": "keep literal"
+              }
+            ],
+            "properties": {
+              "nested": {
+                "items": {
+                  "properties": {
+                    "value": {
+                      "pattern": "a(?=b)",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "path": {
+                "pattern": "(?=.)path",
+                "type": "string"
+              },
+              "pattern": {
+                "default": "literal pattern",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": "Bash"
+        }
+      ]
+    },
+    "lite": false,
+    "model": "gpt-5.5",
+    "name": "gpt-5.5-medium-tool-schema"
+  },
+  {
+    "expected": {
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "content": [
+            {
+              "text": "synthetic task",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": [
+            {
+              "text": "synthetic in-turn instruction",
+              "type": "input_text"
+            }
+          ],
+          "role": "developer",
+          "type": "message"
+        }
+      ],
+      "instructions": "synthetic coding instructions",
+      "model": "gpt-5.5",
+      "parallel_tool_calls": true,
+      "prompt_cache_key": "contract-session",
+      "reasoning": {
+        "effort": "high",
+        "summary": "auto"
+      },
+      "store": false,
+      "stream": true,
+      "text": {
+        "verbosity": "low"
+      },
+      "tools": [
+        {
+          "description": "synthetic tool",
+          "name": "Bash",
+          "parameters": {
+            "$defs": {
+              "pattern": {
+                "type": "string"
+              }
+            },
+            "examples": [
+              {
+                "pattern": "keep literal"
+              }
+            ],
+            "properties": {
+              "nested": {
+                "items": {
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "path": {
+                "type": "string"
+              },
+              "pattern": {
+                "default": "literal pattern",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "strict": false,
+          "type": "function"
+        }
+      ]
+    },
+    "expected_headers": {
+      "accept": "text/event-stream",
+      "authorization": "Bearer mock-access",
+      "chatgpt-account-id": "mock-workspace",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      "originator": "claude-code-proxy",
+      "session-id": "contract-session",
+      "user-agent": "claude-code-proxy/0.1.48",
+      "x-client-request-id": "contract-session",
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-codex-window-id": "contract-session:0"
+    },
+    "input": {
+      "messages": [
+        {
+          "content": "synthetic task",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "synthetic in-turn instruction",
+              "type": "text"
+            }
+          ],
+          "role": "system"
+        }
+      ],
+      "model": "sonnet",
+      "output_config": {
+        "effort": "high"
+      },
+      "system": "synthetic coding instructions",
+      "tools": [
+        {
+          "description": "synthetic tool",
+          "input_schema": {
+            "$defs": {
+              "pattern": {
+                "pattern": "look(?=ahead)",
+                "type": "string"
+              }
+            },
+            "examples": [
+              {
+                "pattern": "keep literal"
+              }
+            ],
+            "properties": {
+              "nested": {
+                "items": {
+                  "properties": {
+                    "value": {
+                      "pattern": "a(?=b)",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "path": {
+                "pattern": "(?=.)path",
+                "type": "string"
+              },
+              "pattern": {
+                "default": "literal pattern",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": "Bash"
+        }
+      ]
+    },
+    "lite": false,
+    "model": "gpt-5.5",
+    "name": "gpt-5.5-high-tool-schema"
+  },
+  {
+    "expected": {
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "content": [
+            {
+              "text": "synthetic output",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "model": "gpt-5.5",
+      "parallel_tool_calls": true,
+      "prompt_cache_key": "contract-session",
+      "reasoning": {
+        "effort": "high",
+        "summary": "auto"
+      },
+      "store": false,
+      "stream": true,
+      "text": {
+        "format": {
+          "name": "response",
+          "schema": {
+            "additionalProperties": false,
+            "properties": {
+              "answer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "answer"
+            ],
+            "type": "object"
+          },
+          "strict": true,
+          "type": "json_schema"
+        },
+        "verbosity": "low"
+      }
+    },
+    "expected_headers": {
+      "accept": "text/event-stream",
+      "authorization": "Bearer mock-access",
+      "chatgpt-account-id": "mock-workspace",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      "originator": "claude-code-proxy",
+      "session-id": "contract-session",
+      "user-agent": "claude-code-proxy/0.1.48",
+      "x-client-request-id": "contract-session",
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-codex-window-id": "contract-session:0"
+    },
+    "input": {
+      "messages": [
+        {
+          "content": "synthetic output",
+          "role": "user"
+        }
+      ],
+      "model": "sonnet",
+      "output_config": {
+        "effort": "high",
+        "format": {
+          "schema": {
+            "additionalProperties": false,
+            "properties": {
+              "answer": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "json_schema"
+        }
+      }
+    },
+    "lite": false,
+    "model": "gpt-5.5",
+    "name": "gpt-5.5-structured-output"
+  }
+]
