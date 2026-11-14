@@ -52,3 +52,13 @@ Không bê agent runtime vào proxy. Claude Code thực thi tool và agent loop;
 proxy chuyển giao thức và chọn account/provider. Revision nguồn port được ghi
 ở `src/providers/codex/schema.rs` và `tests/fixtures/codex/README.md`;
 MIT attribution ở `LICENSE` (cũng được copy vào runtime image).
+
+## Client classifier routing
+
+`[auto_review]` trong TOML có hai optional keys `provider`, `model`; mỗi field
+kế thừa độc lập tuyến mặc định/requested model khi bỏ qua. Neutral enum
+`RequestPurpose` dùng `Conversation`/`ActionReview`; exact client prompt nhận diện
+ở ProtocolAdapter, không rò sang domain/server policy. `RequestRoutingPolicy` là
+Strategy provider-neutral, implementation config ở `server/request_policy.rs`.
+JEV chưa implement; không ghi provider đó vào config trước khi có registration
+thật. Biến `CLAUDE_CODE_AUTO_MODE_SERVER=0` thuộc process client, không phải server.

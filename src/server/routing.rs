@@ -1,5 +1,5 @@
 //! Account policy and provider Strategy dispatch, shared by all protocol adapters.
-use super::{AdmissionPermit, AppState};
+use super::{AdmissionPermit, AppState, request_policy::RequestRoute};
 use crate::{
     accounts::{Account, now},
     domain::error::{FailureKind, ProxyError},
@@ -14,6 +14,7 @@ pub fn generate(
     context: RequestContext,
     first_account: Account,
     permit: AdmissionPermit,
+    route: RequestRoute,
 ) -> EventStream {
     Box::pin(async_stream::stream! {
         let mut first_account = Some(first_account);
@@ -31,7 +32,7 @@ pub fn generate(
             } else {
                 let store = state.store.clone();
                 let skip = excluded.clone();
-                let provider_name = state.config.default_provider.clone();
+                let provider_name = route.provider.clone();
                 let preparation_permit = permit.clone();
                 match tokio::task::spawn_blocking(move || {
                     let _permit = preparation_permit;
@@ -43,7 +44,7 @@ pub fn generate(
                 }
             };
             excluded.insert(account.id.clone());
-            let provider = match state.providers.get(&state.config.default_provider) {
+            let provider = match state.providers.get(&route.provider) {
                 Ok(provider) => provider,
                 Err(error) => { yield Err(error); return; }
             };
@@ -51,7 +52,8 @@ pub fn generate(
                 request_id = %context.request_id,
                 account_id = %account.id,
                 provider = provider.name(),
-                requested_model = %request.model,
+                routed_model = %request.model,
+                request_purpose = request.purpose.as_str(),
                 event = "provider_attempt"
             );
 

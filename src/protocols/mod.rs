@@ -2,10 +2,13 @@
 pub mod anthropic;
 use crate::{
     domain::error::ProxyError,
-    domain::{GenerationEvent, GenerationOutput, GenerationRequest},
+    domain::{GenerationEvent, GenerationOutput, GenerationRequest, RequestPurpose},
 };
 use serde_json::Value;
 pub trait ProtocolAdapter: Send + Sync {
+    fn request_purpose(&self, _value: &Value) -> RequestPurpose {
+        RequestPurpose::Conversation
+    }
     fn decode(&self, value: Value) -> Result<GenerationRequest, ProxyError>;
     fn encode_event(&self, event: GenerationEvent) -> Vec<(String, Value)>;
     fn encode_response(&self, response: GenerationOutput) -> Value;

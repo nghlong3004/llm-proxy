@@ -41,6 +41,7 @@ pub fn translate(
                 Content::Thinking { summary, signature } => {
                     if let Some(replay) = signature
                         .as_ref()
+                        .filter(|_| request.purpose == RequestPurpose::Conversation)
                         .and_then(|s| signer.verify(s, account, generation, actual_model))
                     {
                         flush(&mut input, &mut text, role);

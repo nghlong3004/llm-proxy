@@ -7,6 +7,33 @@ use crate::{
 use serde_json::{Value, json};
 pub struct Anthropic;
 impl ProtocolAdapter for Anthropic {
+    fn request_purpose(&self, value: &Value) -> RequestPurpose {
+        const PREFIX: &str = "You are a security monitor for autonomous AI coding agents.";
+        if !matches!(value.get("stream"), None | Some(Value::Bool(false))) {
+            return RequestPurpose::Conversation;
+        }
+        match value.get("tools") {
+            None => {}
+            Some(Value::Array(tools)) if tools.is_empty() => {}
+            _ => return RequestPurpose::Conversation,
+        }
+        let is_review = match value.get("system") {
+            Some(Value::String(text)) => text.starts_with(PREFIX),
+            Some(Value::Array(blocks)) => blocks.iter().any(|block| {
+                block.get("type").and_then(Value::as_str) == Some("text")
+                    && block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| text.starts_with(PREFIX))
+            }),
+            _ => false,
+        };
+        if is_review {
+            RequestPurpose::ActionReview
+        } else {
+            RequestPurpose::Conversation
+        }
+    }
     fn decode(&self, value: Value) -> Result<GenerationRequest, ProxyError> {
         let object = value
             .as_object()
@@ -161,6 +188,7 @@ impl ProtocolAdapter for Anthropic {
             return Err(ProxyError::invalid("stream must be a boolean"));
         }
         Ok(GenerationRequest {
+            purpose: RequestPurpose::Conversation,
             model,
             system,
             messages,

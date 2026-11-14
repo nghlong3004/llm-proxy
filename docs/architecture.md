@@ -24,6 +24,11 @@ request sau đọc registry mới nên thêm/xóa/login không cần restart ser
   chọn implementation theo tên; Codex là provider thực tế đầu tiên.
 - **Policy** `server/routing.rs`: sticky account, failover, commitment và shutdown;
   độc lập với wire schema Anthropic/Codex.
+- **Strategy** `RequestRoutingPolicy`: chọn immutable `RequestRoute { provider,
+  model }` cho mỗi generation, từ neutral `RequestPurpose`. Implementation
+  `ConfiguredRequestRoutingPolicy` chỉ đọc config, không biết Codex/JEV; inject
+  qua AppState như Provider/ProtocolAdapter. Sau này provider JEV dùng seam cũ,
+  không cần nhánh riêng trong HTTP handler.
 - **Repository** `accounts::Store`: đóng gói registry/credential, khóa và atomic I/O.
 
 `domain/` không import Axum, Anthropic schema hay Codex wire types. Streaming và
@@ -65,6 +70,7 @@ src/
     tokens.rs               OAuth token/identity extraction
   server/
     mod.rs                  HTTP routes, permits, SSE/buffered delivery
+    request_policy.rs       replaceable per-request provider/model Strategy
     routing.rs              account policy, dispatch, safe failover
   logging/
     mod.rs                  safe metadata, request lifecycle, worker
@@ -80,6 +86,35 @@ docs/
   implementation-progress.md trạng thái tiếp nối công việc
   superpowers/plans/        kế hoạch đã thống nhất
 ```
+
+## Client-side action review
+
+Anthropic Adapter có pure hook `request_purpose(&Value)`: chỉ non-streaming,
+không tools, exact classifier prefix ở đầu system string/một system text block
+mới nhận `ActionReview`. Prompt/schema recognition dừng ở protocol boundary;
+`domain::RequestPurpose` chỉ có Conversation/ActionReview. Adapter khác có
+implementation mặc định Conversation. Hook generation-only; count_tokens không
+nhận diện hoặc apply route classifier. Đây là heuristic routing, không cấp quyền.
+
+Server validate model gốc, evaluate policy đúng một lần, validate tuyến hiệu dụng,
+chọn account/provider theo route qua mọi lần failover. Default conversation giữ
+precedence lỗi empty-account cũ; review và provider override được kiểm tra provider
+trước select. Route không mutate Config/default provider hay affinity toàn cục.
+`[auto_review]` provider/model optional, từng field kế thừa độc lập. Explicit model
+validate qua existing registry; unknown provider bị từ chối ở CLI startup và runtime,
+không fallback. Model string giữ suffix service tier; response Start được remap
+về model client khi override. Log tách requested/routed/native model bằng request ID.
+
+Classifier giữ transcript/schema/effort, nhưng session_id=None và Codex translator
+không replay encrypted reasoning kể cả signature hợp lệ; summary vẫn là text.
+Không sửa/parse model output thành verdict hay chạy tools. Interface Provider và
+RequestContext giữ nguyên. Fake provider/policy integration test chứng minh OCP/DIP;
+chưa triển khai JEV vì chưa có API/auth contract. Model khác không được coi là
+classifier an toàn tương đương Claude chỉ vì wire test pass.
+
+Client opt-in `CLAUDE_CODE_AUTO_MODE_SERVER=0` dùng classifier requests riêng; proxy
+không implement/fabricate server safeguards protocol. Không tự sửa settings/service
+user; live Auto/Codex acceptance cần kiểm tra riêng được user cho phép.
 
 ## State và concurrency
 

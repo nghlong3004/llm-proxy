@@ -5,6 +5,11 @@ Kế hoạch: `docs/superpowers/plans/2026-11-12-llm-proxy-v1.md`.
 
 ## Trạng thái hiện tại
 
+Mốc mới nhất **2026-11-14**: client Auto-mode classifier routing theo Strategy,
+config `[auto_review]`, seam provider dành cho JEV tương lai; **105 tests**, full
+Rust gate, Docker smoke và CLI2.1.322 mock fail-closed probe PASS. Xem mục cuối.
+Chưa kết luận safety/live Codex acceptance; không sửa settings/service user.
+
 Mốc mới nhất **2026-11-13**: Docker/Compose + runtime hardening, full gate **93
 pass**, container smoke và resource soak 180s pass. Xem mục “Kết quả Docker +
 hardening + resource soak” bên dưới để biết số RAM/CPU thực tế và giới hạn đo.
@@ -370,6 +375,75 @@ account lặp giữa HTTP preflight và routing. Đây là các findings source 
 mốc hardening ở trên đã sửa và bổ sung regression cho các case này sau khi user
 mở rộng yêu cầu. Snapshot 66 tests trước đó chưa phủ các case này; full gate mới
 có 93 tests. Không refactor rộng ngoài các lifecycle/budget/admission cần thiết.
+
+## Auto-mode client classifier routing — 2026-11-14
+
+User yêu cầu triển khai client classifier qua localhost theo OOP/SOLID và một
+pattern, dự định JEV làm reviewer sau. Chọn **Strategy** `RequestRoutingPolicy`,
+config optional `[auto_review] provider/model`, default kế thừa tuyến hiện tại;
+chưa có JEV API/auth contract nên không thêm provider giả hoặc hardcode JEV.
+Branch `feat/auto-review-routing`, không commit/push/restart service hoặc sửa
+settings user. Client dùng option chính thức `CLAUDE_CODE_AUTO_MODE_SERVER=0`;
+không giả lập server `safeguard_results`, không tự trả verdict allow.
+
+Mốc protocol: neutral RequestPurpose, ProtocolAdapter raw JSON detector hẹp,
+classifier stateless/session None và chặn encrypted-reasoning replay (giữ summary)
+đã triển khai. Translation **15/15 PASS**, gồm RED detector/replay trước fix.
+Mốc routing: hai regression RED tái hiện review vẫn tới Codex default và unknown
+review provider bị bỏ qua. GREEN đầu **7/7 auto_review tests**, gồm provider/model
+isolation, response model gốc, tier suffix, config validation, injected Strategy,
+count_tokens không route và failover đúng provider. Full server regression phát
+hiện thay thứ tự lỗi empty-account từ503→400; đã giữ lại precedence cũ cho tuyến
+conversation mặc định, review/override vẫn validate provider trước select. Đang
+rerun targeted suites rồi full gate/mock CLI; chưa tuyên bố live Auto hoạt động.
+
+Mốc GREEN: auto_review **7**, server **8**, strategies **3**, translation **15**
+pass; precedence empty-account đã giữ nguyên. Full gate đầu **PASS** (fmt, strict
+Clippy, **104 tests**, release). Thêm composed HTTP test localhost thật **1/1 PASS**:
+classifier model/tier riêng, giữ effort/schema/transcript, không session/cachekey,
+conversation không ảnh hưởng, upstream permission error giữ lỗi thay vì allow.
+Cần chạy gate cuối gồm test mới; image rebuild/smoke và CLI probe còn đang chạy.
+Không thêm dependency, không thay Provider/RequestContext signatures.
+
+Full gate cuối gồm composed HTTP test mới **PASS**: fmt, strict all-target/all-feature
+Clippy, **105 tests (0 fail/ignored)**, release build. Log
+`/tmp/claude-1000/-home-nghlong3004-projects-llm-proxy/446044fa-422f-40e9-aaf7-61a25fc9bc77/tasks/bjjz2rjwq.output`.
+CLI2.1.322 probe cô lập đã phát classifier thật tới localhost: conversation model
+`gpt-6.1-sol`, reviewer `gpt-5.5`, non-streaming/tools0; mock cố ý trả503, không tạo
+verdict allow và lệnh synthetic không chạy. Đang rerun script cuối với assert
+fail-closed và header checks; không suy luận từ native binary strings rằng client
+luôn server-only (binary chứa cả hai codepaths). Đây không phải live Codex safety
+acceptance, không gửi account/token/prompt thật ra ngoài.
+
+Strengthened CLI2.1.322 release probe **PASS**: 2 conversation stream requests và
+10 classifier requests non-stream/tools0; native reviewer `gpt-5.5`, conversation
+`gpt-6.1-sol`. Review không có `session-id`, `x-codex-window-id`, `prompt_cache_key`.
+Mock503 tạo tool_result `is_error=true` với classifier-error; marker thực thi
+không xuất hiện, không timeout/mock failure. Không fabricate verdict/schema allow.
+Docker image rebuild + isolated `check-docker.py` cuối **PASS**, exit0:
+non-root/private fresh state, host loopback HTTP, persistent state/recreate/hot
+remove và SIGINT/flush; project/volume tạm đã dọn. Output
+`/tmp/claude-1000/-home-nghlong3004-projects-llm-proxy/446044fa-422f-40e9-aaf7-61a25fc9bc77/tasks/becpb5ced.output`.
+Reusable CLI script direct invocation cuối **PASS**, exit0:
+`python3 -I scripts/check-auto-review.py --timeout 60`. Stdin DEVNULL, phân tách
+variadic --tools bằng -- để prompt không bị nuốt. Zero-HTTP ở probe đầu là lỗi
+cơ chế command parsing của harness, không phải bằng chứng Auto eligibility bị chặn.
+Tất cả account/model output đều synthetic; không dùng quota thật. CLI safety
+probe chỉ xác minh nhánh classifier failure đóng an toàn, không tự tạo verdict
+allow hoặc tuyên bố model review tương đương Claude. Code trên branch
+`feat/auto-review-routing`, chưa commit/push; chưa install/restart service user.
+Muốn dùng instance hiện có phải cập nhật binary/config rồi restart có chủ đích;
+biến server=0 phải đặt ở process Claude Code mới, không phải proxy process.
+
+User tiếp tục yêu cầu add+commit, không thêm author/co-author trailer; không yêu
+cầu push/merge hoặc thực hiện install/restart. Pre-commit gate chạy lại **PASS**:
+fmt check, strict Clippy, **105 tests**, release build; output
+`/tmp/claude-1000/-home-nghlong3004-projects-llm-proxy/446044fa-422f-40e9-aaf7-61a25fc9bc77/tasks/b882fmtyl.output`.
+Commit trên `feat/auto-review-routing`, hash xem git log. Khuyến nghị ban đầu giữ
+reviewer cùng model chính `gpt-6.1-sol` nếu account được cấp quyền; chưa có dữ liệu
+safety/latency với model thật để khuyên downgrade reviewer. Global binary/service
+hiện có vẫn cần cập nhật có chủ đích; không cần xóa state hoặc login lại chỉ vì
+đổi binary. Model review config optional: không thêm thì kế thừa tuyến hiện tại.
 
 ## Công việc tiếp theo
 

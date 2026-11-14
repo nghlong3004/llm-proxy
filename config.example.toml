@@ -8,6 +8,13 @@ listen_port = 18765
 # Metadata only; no prompts, tool arguments or credentials.
 log_level = "info"
 
+# Optional client-side Auto mode classifier route. Omit either field to inherit
+# the default provider / requested model. Requires CLAUDE_CODE_AUTO_MODE_SERVER=0
+# on the Claude Code process; this does not disable permission checks.
+[auto_review]
+# provider = "codex"
+# model = "gpt-6.1-sol"
+
 # Unmapped Claude aliases all use default_model. Override individual aliases here.
 [aliases]
 # haiku = "gpt-6-luna"

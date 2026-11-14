@@ -192,8 +192,23 @@ pub enum ToolChoice {
     Required,
     Named(String),
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RequestPurpose {
+    #[default]
+    Conversation,
+    ActionReview,
+}
+impl RequestPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Conversation => "conversation",
+            Self::ActionReview => "action_review",
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub struct GenerationRequest {
+    pub purpose: RequestPurpose,
     pub model: String,
     pub system: String,
     pub messages: Vec<Message>,

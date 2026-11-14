@@ -37,6 +37,7 @@ pub struct Config {
     pub listen_port: u16,
     pub codex_endpoint: String,
     pub log_level: String,
+    pub auto_review: AutoReviewConfig,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -49,9 +50,18 @@ impl Default for Config {
             listen_port: 18765,
             codex_endpoint: CODEX_ENDPOINT.into(),
             log_level: "info".into(),
+            auto_review: AutoReviewConfig::default(),
         }
     }
 }
+/// Optional route overrides for client-side action review; omitted fields inherit.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AutoReviewConfig {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelPolicy {
@@ -93,6 +103,17 @@ impl Config {
             if target.trim().is_empty() {
                 bail!("Model aliases cannot have empty targets");
             }
+        }
+        if let Some(provider) = &self.auto_review.provider
+            && provider.trim().is_empty()
+        {
+            bail!("auto_review.provider cannot be empty");
+        }
+        if let Some(model) = &self.auto_review.model {
+            if model.trim().is_empty() {
+                bail!("auto_review.model cannot be empty");
+            }
+            self.resolve(model).context("Invalid auto_review.model")?;
         }
         Ok(())
     }

@@ -1,11 +1,12 @@
 //! HTTP delivery and lifecycle. Provider selection/retry lives in `routing`.
+pub mod request_policy;
 mod routing;
 use crate::{
     accounts::{AccountStatus, Store, now},
     config::Config,
     domain::accumulator::Accumulator,
     domain::error::{FailureKind, ProxyError},
-    domain::{GenerationEvent, RequestContext},
+    domain::{GenerationEvent, RequestContext, RequestPurpose},
     logging::RequestLog,
     protocols::{ProtocolAdapter, anthropic::Anthropic},
     providers::ProviderRegistry,
@@ -19,6 +20,7 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::StreamExt;
+use request_policy::{ConfiguredRequestRoutingPolicy, RequestRoutingPolicy};
 use serde_json::{Value, json};
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
@@ -29,17 +31,21 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub providers: ProviderRegistry,
     pub protocol: Arc<dyn ProtocolAdapter>,
+    pub request_policy: Arc<dyn RequestRoutingPolicy>,
     permits: Arc<Semaphore>,
     shutdown: watch::Sender<bool>,
 }
 impl AppState {
     pub fn new(store: Store, config: Config, providers: ProviderRegistry) -> Self {
         let (shutdown, _) = watch::channel(false);
+        let config = Arc::new(config);
+        let request_policy = Arc::new(ConfiguredRequestRoutingPolicy::new(config.clone()));
         Self {
             store,
-            config: Arc::new(config),
+            config,
             providers,
             protocol: Arc::new(Anthropic),
+            request_policy,
             permits: Arc::new(Semaphore::new(32)),
             shutdown,
         }
@@ -126,13 +132,30 @@ async fn generate_response(
     let permit = admit(&state)?;
     let headers = request.headers().clone();
     let value = read_json(&state, request).await?;
-    let request = Arc::new(state.protocol.decode(value)?);
+    let purpose = state.protocol.request_purpose(&value);
+    let mut request = state.protocol.decode(value)?;
+    request.purpose = purpose;
     state
         .config
         .resolve(&request.model)
         .map_err(|e| ProxyError::invalid(e.to_string()).with_code("unknown_model"))?;
+    let route = state.request_policy.route(&request)?;
+    if purpose == RequestPurpose::ActionReview || route.provider != state.config.default_provider {
+        state.providers.get(&route.provider)?;
+    }
+    state
+        .config
+        .resolve(&route.model)
+        .map_err(|e| ProxyError::invalid(e.to_string()).with_code("unknown_model"))?;
+    let requested_model = request.model.clone();
+    tracing::debug!(request_id, request_purpose = purpose.as_str(),
+        requested_model = %requested_model, routed_model = %route.model,
+        provider = %route.provider, event = "request_route_selected");
+    let model_overridden = route.model != requested_model;
+    request.model = route.model.clone();
+    let request = Arc::new(request);
     let excluded = std::collections::HashSet::new();
-    let provider_name = state.config.default_provider.clone();
+    let provider_name = route.provider.clone();
     let store = state.store.clone();
     let preparation_permit = permit.clone();
     let account = tokio::task::spawn_blocking(move || {
@@ -142,7 +165,7 @@ async fn generate_response(
     .await
     .map_err(|_| ProxyError::storage())??
     .account;
-    state.providers.get(&state.config.default_provider)?;
+    state.providers.get(&route.provider)?;
     let session_id = headers
         .get("x-claude-code-session-id")
         .and_then(|v| v.to_str().ok())
@@ -155,7 +178,11 @@ async fn generate_response(
         .map(str::to_owned);
     let context = RequestContext {
         request_id: request_id.to_owned(),
-        session_id,
+        session_id: if purpose == RequestPurpose::ActionReview {
+            None
+        } else {
+            session_id
+        },
     };
     let mut events = routing::generate(
         state.clone(),
@@ -163,7 +190,20 @@ async fn generate_response(
         context,
         account,
         permit.clone(),
-    );
+        route,
+    )
+    .map(move |event| {
+        event.map(|event| match event {
+            GenerationEvent::Start {
+                id, input_tokens, ..
+            } if model_overridden => GenerationEvent::Start {
+                id,
+                model: requested_model.clone(),
+                input_tokens,
+            },
+            event => event,
+        })
+    });
     let adapter = state.protocol.clone();
     let response = if request.stream {
         let mut log = log

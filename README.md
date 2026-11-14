@@ -194,6 +194,61 @@ Chọn model mà account của bạn có quyền dùng. Tên xuất hiện trong
 không bảo đảm account được cấp quyền. Hậu tố `[1m]` chỉ được chuẩn hóa ở đầu vào;
 proxy không làm tăng context window của model.
 
+## Auto mode và classifier request
+
+Claude Code có thể gửi request phụ để kiểm tra một hành động trước khi thực thi.
+Để dùng classifier phía client qua proxy này, mở **phiên mới** với cấu hình gateway
+như phần trên và thêm biến sau vào **process Claude Code**, không phải proxy/container:
+
+```sh
+CLAUDE_CODE_AUTO_MODE_SERVER=0 claude --model sonnet --permission-mode auto
+```
+
+Đây là [cấu hình được Claude Code hướng dẫn](https://code.claude.com/docs/en/auto-mode-classifier-billing.md#make-the-session-eligible)
+để dùng các request classifier riêng thay cho server-side review; **không bỏ kiểm
+tra quyền**. Request phụ dùng quota/token và tăng latency. Proxy không hỗ trợ
+server-side `safeguards`/`safeguard_results`, không giả verdict allow; lỗi vẫn về
+Claude Code để hỏi/chặn theo chính sách client. Không tự chỉnh settings user.
+
+Có thể cấu hình route riêng trong state `config.toml` rồi restart proxy:
+
+```toml
+[auto_review]
+provider = "codex"
+model = "gpt-6.1-sol"
+```
+
+Cả hai key đều optional: thiếu provider kế thừa `default_provider`, thiếu model
+kế thừa model/alias client yêu cầu. Không tự chọn model rẻ/yếu hơn hoặc hạ effort.
+Override phải trỏ provider đã đăng ký và model hợp lệ trong registry; sai cấu hình
+trả lỗi, không âm thầm dùng model khác. Main conversation và token counting không
+bị đổi route. Alias/model gốc vẫn được giữ trong response cho client.
+
+Nhận diện dùng exact system-prefix của client, request non-streaming và không
+khai báo tools; không scan user text hay suy diễn từ keyword. Đây là route hint,
+không phải xác thực. Review giữ transcript/schema/effort nhưng không dùng session
+cache key hoặc replay encrypted reasoning từ conversation. Proxy chỉ chuyển tiếp
+kết quả model, không tự thực thi hành động hoặc parse thành quyền cho phép.
+
+**Strategy pattern / SOLID:** `RequestRoutingPolicy` chọn provider/model;
+`ProtocolAdapter` nhận diện loại request; `Provider` thực hiện generation. Các
+thành phần được inject qua `AppState`, không cần class inheritance hoặc DI framework.
+Sau này JEV có API/auth implementation thật thì thêm `Provider`, đăng ký model và
+đổi `[auto_review]`; không cần thêm nhánh JEV vào HTTP handler. Hiện **chưa có JEV
+provider**, chưa chứng minh model Codex review tương đương safety classifier Claude.
+Anthropic không hỗ trợ chính thức routing Claude Code sang non-Claude models.
+
+Có smoke client cô lập, không dùng account/quota thật:
+
+```sh
+python3 -I scripts/check-auto-review.py
+```
+
+Script dùng Claude Code đã cài, temp HOME/state và localhost mock. Nó cố ý trả lỗi
+classifier để kiểm tra routing và fail-closed, **không tạo verdict allow**. Exit 2
+là BLOCKED/inconclusive nếu client không phát classifier hoặc chưa chứng minh được
+hành động bị chặn. PASS cũng không chứng minh safety của model Codex thật.
+
 ## Cấu hình
 
 Mặc định state/config nằm tại `$XDG_STATE_HOME/llm-proxy`, hoặc
@@ -316,7 +371,8 @@ Giữ hai bản cũ `proxy.1.jsonl`, `proxy.2.jsonl`; mỗi file tối đa kho�
 (có thể vượt một record để không cắt JSON). Thư mục `0700`, file `0600`.
 
 Mỗi request generation có `x-request-id` ở response và `request_id` trong log.
-Các event hữu ích: `upstream_attempt` (provider/model thực tế/account, requested_model, reasoning_effort, lane), `upstream_failure`
+Các event hữu ích: `request_route_selected` (DEBUG: requested_model gốc, routed_model, provider, request_purpose),
+`upstream_attempt` (provider/model thực tế/account, routed_model, request_purpose, reasoning_effort, lane), `upstream_failure`
 (loại lỗi, error_code, đã phát nội dung chưa, có retry không), `request_completed` (thời gian
 và token usage), `request_failed`, `request_cancelled`, `proxy_started/stopped`.
 Refresh token chỉ ghi mốc hoàn tất/thất bại/thu hồi credential cùng account ID và phase/status;

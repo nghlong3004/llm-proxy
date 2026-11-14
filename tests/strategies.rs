@@ -58,6 +58,7 @@ impl ProtocolAdapter for MinimalProtocol {
             .and_then(Value::as_str)
             .ok_or_else(|| ProxyError::invalid("input is required"))?;
         Ok(GenerationRequest {
+            purpose: RequestPurpose::Conversation,
             model: "echo-model".into(),
             system: text.into(),
             messages: vec![],

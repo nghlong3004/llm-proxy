@@ -169,6 +169,9 @@ pub async fn run() -> Result<()> {
                     .await??;
             providers.register(Arc::new(codex));
             providers.get(&config.default_provider)?;
+            if let Some(provider) = &config.auto_review.provider {
+                providers.get(provider)?;
+            }
             let address = std::net::SocketAddr::new(config.listen_address, config.listen_port);
             let state = AppState::new(store, config, providers);
             let shutdown = state.clone();

@@ -1,10 +1,163 @@
 use llm_proxy::{
     config::Config,
-    domain::Content,
+    domain::{Content, RequestPurpose},
     protocols::{ProtocolAdapter, anthropic::Anthropic},
     providers::codex::{reasoning::ReasoningSigner, request::translate},
 };
 use serde_json::json;
+
+const ACTION_REVIEW_PREFIX: &str = "You are a security monitor for autonomous AI coding agents.";
+
+#[test]
+fn action_review_classifies_exact_system_prefix_in_string_or_any_text_block() {
+    for system in [
+        json!(ACTION_REVIEW_PREFIX),
+        json!(format!(
+            "{ACTION_REVIEW_PREFIX}\nReview the proposed action."
+        )),
+        json!([{"type":"text","text":ACTION_REVIEW_PREFIX}]),
+        json!([
+            {"type":"text","text":"Client preamble"},
+            {"type":"text","text":format!("{ACTION_REVIEW_PREFIX}\nReview.")}
+        ]),
+    ] {
+        for stream in [None, Some(json!(false))] {
+            for tools in [None, Some(json!([]))] {
+                let mut value = json!({"model":"sonnet","system":system,"messages":[{"role":"user","content":"Action"}]});
+                if let Some(stream) = stream.as_ref() {
+                    value["stream"] = stream.clone();
+                }
+                if let Some(tools) = tools {
+                    value["tools"] = tools;
+                }
+                assert_eq!(
+                    Anthropic.request_purpose(&value),
+                    RequestPurpose::ActionReview,
+                    "system prefix should classify: {value}"
+                );
+                assert_eq!(
+                    Anthropic.decode(value).unwrap().purpose,
+                    RequestPurpose::Conversation,
+                    "decoding alone must not classify, including for token counting"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn action_review_does_not_scan_substrings_history_or_non_text_system_blocks() {
+    for value in [
+        json!({}),
+        json!({"system":null}),
+        json!({"system":42}),
+        json!({"system":format!(" {ACTION_REVIEW_PREFIX}")}),
+        json!({"system":format!("Quoted: {ACTION_REVIEW_PREFIX}")}),
+        json!({"system":"You are a security monitor for autonomous AI coding agents"}),
+        json!({"system":ACTION_REVIEW_PREFIX.to_lowercase()}),
+        json!({"system":[{"type":"image","text":ACTION_REVIEW_PREFIX}]}),
+        json!({"system":[{"text":ACTION_REVIEW_PREFIX}]}),
+        json!({"system":[{"type":"text","text":42}]}),
+        json!({"system":[{"type":"text","text":format!("Before {ACTION_REVIEW_PREFIX}")}]}),
+        json!({"system":[{"type":"text","content":[{"type":"text","text":ACTION_REVIEW_PREFIX}]}]}),
+        json!({"messages":[{"role":"user","content":ACTION_REVIEW_PREFIX}]}),
+        json!({"messages":[{"role":"system","content":ACTION_REVIEW_PREFIX}]}),
+    ] {
+        assert_eq!(
+            Anthropic.request_purpose(&value),
+            RequestPurpose::Conversation
+        );
+    }
+}
+
+#[test]
+fn action_review_rejects_streaming_and_tools_including_malformed_values() {
+    for (field, invalid_values) in [
+        (
+            "stream",
+            vec![
+                json!(true),
+                json!(null),
+                json!("false"),
+                json!(0),
+                json!([]),
+                json!({}),
+            ],
+        ),
+        (
+            "tools",
+            vec![
+                json!([{"name":"Read","input_schema":{"type":"object"}}]),
+                json!(null),
+                json!({}),
+                json!(""),
+                json!(false),
+            ],
+        ),
+    ] {
+        for invalid in invalid_values {
+            let mut value = json!({"model":"sonnet","system":ACTION_REVIEW_PREFIX,"messages":[{"role":"user","content":"Action"}]});
+            value[field] = invalid;
+            assert_eq!(
+                Anthropic.request_purpose(&value),
+                RequestPurpose::Conversation
+            );
+            if value[field] != json!(true) && !value[field].is_array() {
+                assert!(
+                    Anthropic.decode(value).is_err(),
+                    "malformed {field} must still fail decoding"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn conversation_replays_signed_reasoning_but_action_review_keeps_only_summary() {
+    let signer = ReasoningSigner::new([4; 32]);
+    let config = Config::default();
+    for model_id in ["gpt-5.5", "gpt-6.1-sol"] {
+        let model = config.resolve(model_id).unwrap();
+        let signature = signer
+            .sign("a", "gen1", model_id, "rs_1", "encrypted")
+            .unwrap();
+        let value = json!({
+            "model":model_id,"system":ACTION_REVIEW_PREFIX,"output_config":{"effort":"high","format":{"type":"json_schema","schema":{"type":"object","properties":{"allow":{"type":"boolean"}},"required":["allow"],"additionalProperties":false}}},
+            "messages":[
+                {"role":"assistant","content":[{"type":"thinking","thinking":"Portable reasoning summary","signature":signature},{"type":"text","text":"Earlier reply"}]},
+                {"role":"user","content":"Review this action"}
+            ]
+        });
+        let mut request = Anthropic.decode(value.clone()).unwrap();
+        assert_eq!(request.purpose, RequestPurpose::Conversation);
+        let conversation = translate(&request, &model, "a", "gen1", &signer, None).unwrap();
+        assert!(conversation["input"].as_array().unwrap().iter().any(|item| item["type"] == "reasoning" && item["encrypted_content"] == "encrypted"));
+        request.purpose = Anthropic.request_purpose(&value);
+        assert_eq!(request.purpose, RequestPurpose::ActionReview);
+        let review = translate(&request, &model, "a", "gen1", &signer, None).unwrap();
+        assert!(
+            review["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["type"] != "reasoning")
+        );
+        let offset = usize::from(model.responses_lite);
+        assert_eq!(
+            review["input"][offset]["content"],
+            json!([
+                {"type":"output_text","text":"Prior reasoning summary:\nPortable reasoning summary"},
+                {"type":"output_text","text":"Earlier reply"}
+            ])
+        );
+        assert_eq!(
+            review["input"][offset + 1],
+            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"Review this action"}]})
+        );
+        assert_eq!(review["reasoning"], conversation["reasoning"]);
+        assert_eq!(review["text"], conversation["text"]);
+    }
+}
 
 #[test]
 fn anthropic_tools_and_images_become_native_codex_input() {
