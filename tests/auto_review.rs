@@ -176,6 +176,28 @@ async fn unknown_review_provider_does_not_fall_back_to_conversation() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 #[test]
+fn omitted_review_model_defaults_to_luna_without_changing_conversation() {
+    for input in [
+        "default_model = 'gpt-6.1-sol'",
+        "default_model = 'gpt-6.1-sol'\n[auto_review]",
+        "default_model = 'gpt-6.1-sol'\n[auto_review]\nprovider = 'codex'",
+    ] {
+        let config: Config = toml::from_str(input).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.auto_review.model.as_deref(), Some("gpt-6-luna"));
+        let policy = ConfiguredRequestRoutingPolicy::new(Arc::new(config));
+        let mut request = Anthropic.decode(payload(false)).unwrap();
+        assert_eq!(policy.route(&request).unwrap().model, "sonnet");
+        request.purpose = RequestPurpose::ActionReview;
+        assert_eq!(policy.route(&request).unwrap().model, "gpt-6-luna");
+    }
+    assert_eq!(
+        AutoReviewConfig::default().model.as_deref(),
+        Some("gpt-6-luna")
+    );
+}
+
+#[test]
 fn configured_policy_inherits_each_override_independently_and_keeps_model_tiers() {
     for provider in [None, Some("review-test")] {
         for model in [None, Some("gpt-5.5-ultrafast")] {

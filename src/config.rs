@@ -54,12 +54,20 @@ impl Default for Config {
         }
     }
 }
-/// Optional route overrides for client-side action review; omitted fields inherit.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+/// Action-review routing defaults to Luna; the provider inherits the default route.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AutoReviewConfig {
     pub provider: Option<String>,
     pub model: Option<String>,
+}
+impl Default for AutoReviewConfig {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            model: Some("gpt-6-luna".into()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

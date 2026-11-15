@@ -1,107 +1,81 @@
-# LLM Proxy
+# LLM Proxy — contributor instructions
 
-## Context Continuity
+## Workflow and continuity
 
-Use the `project-context` skill when resuming previous work,
-creating milestone checkpoints, or preparing a session handoff.
-If the harness does not expose that skill, read
-`.agents/skills/project-context/SKILL.md` directly and follow its checklist.
-
-Keep `docs/implementation-progress.md` current after each milestone
-or material decision, even if the skill is not activated.
-
-Never rely solely on conversation history for project state.
-
-## 1. Workflow
-
+Use `project-context` when resuming, checkpointing or handing off; if unavailable,
+read `.agents/skills/project-context/SKILL.md`. Never rely on chat history alone.
 Before modifying code, read in order:
 
-1. `docs/implementation-progress.md` — current state, verified work, decisions, next steps. Use as the continuity source.
-2. `docs/architecture.md` — architecture, module boundaries, data flow, invariants.
-3. `docs/superpowers/plans/2026-11-12-llm-proxy-v1.md` — approved v1 implementation plan.
+1. `docs/implementation-progress.md` — current state, checks, blockers, next steps.
+2. `docs/architecture.md` — boundaries, data flow and invariants.
+3. `docs/superpowers/plans/2026-11-12-llm-proxy-v1.md` — approved scope.
+4. `docs/conventions.md` — names, commands and reference provenance.
 
-Rules:
-- Follow the approved architecture and plan. Do not silently change established decisions.
-- Update `implementation-progress.md` immediately after each milestone or decision change, recording results, blockers, and next steps.
-- Never mark work complete without running its relevant checks.
-- Update architecture and usage docs when changing interfaces, commands, or project structure.
-- Read `docs/conventions.md` for command and directory conventions.
-- Use `rust-best-practices` and `rust-async-patterns` skills when implementing or reviewing Rust.
+Follow approved decisions; explain conflicts/critical assumptions before irreversible
+changes. Update progress immediately after each milestone/material decision; replace
+obsolete checkpoints instead of appending transcripts. Update architecture/usage docs
+when interfaces, commands or structure change. Use `rust-best-practices` and
+`rust-async-patterns` when implementing/reviewing Rust.
 
-## 2. Product Requirements
+## Product and boundaries
 
-- Latest stable Rust, edition 2024; latest compatible stable dependencies; commit `Cargo.lock`.
-- Standalone localhost proxy, CLI-managed, backed by Codex subscription accounts.
-- Support multiple accounts. Keep the active account until confirmed quota exhaustion, then switch to the next eligible account.
-- Support adding/removing accounts at runtime; changes affect subsequent requests.
-- Target Claude Code compatibility using `raine/claude-code-proxy` as reference: tools, images, reasoning, structured output, SSE, WebSearch, portable compaction.
-- Never execute agent tools inside the proxy. Claude Code owns filesystem operations, terminal execution, and the agent loop.
+- Latest stable Rust/dependencies, edition 2024; commit `Cargo.lock`.
+- CLI-managed localhost proxy using multiple Codex subscription accounts. Preserve
+  active account until confirmed exhaustion; runtime account changes affect later requests.
+- Target Claude Code tools/images/reasoning/structured output/SSE/WebSearch/portable
+  compaction; reference `raine/claude-code-proxy`. **Never execute agent tools:**
+  Claude Code owns files, shell and the agent loop.
+- Keep modules isolated as mapped in `docs/architecture.md`: CLI only wiring;
+  domain protocol-neutral; adapters own wire schemas/errors; providers own upstream
+  translation; accounts own identity/storage/selection; authentication owns OAuth;
+  server owns orchestration/cancellation; logging owns safe metadata. No layer leakage.
 
-## 3. Architecture Boundaries
-
-| Module | Responsibility |
-|---|---|
-| `main.rs` | Entrypoint only |
-| `cli/` | Command parsing and wiring; no business logic |
-| `domain/` | Protocol-neutral requests, events, errors, non-streaming accumulator |
-| `protocols/` | Agent protocol adapters; Anthropic schemas, SSE, errors |
-| `providers/` | `Provider` strategy, registry, implementations |
-| `providers/codex/` | Translation, search, reasoning, SSE decoding, upstream client |
-| `accounts/` | Identity, storage, selection; Anthropic-agnostic |
-| `authentication/` | OAuth and token refresh; independent of Codex CLI credentials |
-| `server/` | HTTP routing, orchestration, cancellation, failover |
-| `logging/` | Metadata-only JSONL, bounded background queue, rotation |
-| `config.rs` | TOML, model registry/aliases, endpoints |
-| `tests/` | Behavioral tests using fake accounts/upstreams; no real quota consumption |
-
-Keep responsibilities isolated. Avoid cross-layer protocol leakage.
-
-## 4. Mandatory Invariants
+## Mandatory invariants
 
 ### Security
-- Credential directories: `0700`; files: `0600`. Use atomic replacement and cross-process locking.
-- Stale login/refresh operations must never overwrite newer credentials or resurrect deleted accounts.
-- Account identity must distinguish users within the same workspace.
-- Never log prompts, tokens, OAuth codes, or encrypted reasoning. Never commit credentials.
-- Never forward incoming `ANTHROPIC_AUTH_TOKEN` upstream as a Codex credential.
-- Bound upstream request/body sizes.
-- Listener has no client authentication: keep native defaults and Docker host publication on loopback. Bind wildcard only explicitly inside isolated containers; never import host credentials into images.
+- Private directories `0700`, files `0600`; atomic replacement + cross-process locking.
+- Identity distinguishes users in one workspace. Stale login/refresh must neither
+  overwrite newer credentials nor resurrect removed accounts.
+- Never log prompts, tokens, OAuth codes or encrypted reasoning; never commit credentials.
+- Never forward incoming `ANTHROPIC_AUTH_TOKEN` as a Codex credential.
+- Bound upstream requests/bodies. Listener has **no client authentication**: native
+  defaults and Docker host publication stay loopback; wildcard bind only explicitly
+  inside isolated containers. Never import host credentials into images.
 
-### Routing and Recovery
-- Quota failover requires confirmed exhaustion, never generic HTTP 429, model/permission errors, or network failures alone. Before output, definite credential rejection or an account removed/changed before dispatch may also trigger safe reselection; do not classify unrelated storage/network errors as account changes.
-- Never automatically replay after a message/content event or when upstream processing status is uncertain.
-- Replay encrypted reasoning only when account, generation, and model identity are verified.
-- Client disconnect must cancel/release inference work and concurrency permits; retain permits until outstanding blocking jobs complete. Dispatched OAuth refresh transactions are the exception: finish guarded persistence independently of the client and drain on graceful shutdown.
-- Account mutations must not corrupt in-flight request state.
+### Routing and lifecycle
+- Quota failover requires confirmed exhaustion, not generic 429, model/permission,
+  network or 5xx errors. Before output, definite credential rejection or account
+  removal/change before dispatch may safely reselect; unrelated storage/network
+  errors must not be classified as account changes.
+- Never replay after a message/content event or uncertain upstream processing.
+- Encrypted reasoning replay requires verified account, generation and model identity.
+- Mutations must not corrupt in-flight state. Disconnect cancels inference; retain
+  permits until outstanding blocking jobs finish. Dispatched OAuth refresh instead
+  finishes guarded persistence independently of the client and drains on shutdown.
 
-### Rust and Async
-- Prefer meaningful enums and `Result`; avoid `unwrap`/`expect` outside tests.
-- Keep functions focused; introduce traits/abstractions only for concrete needs.
-- Offload CPU-intensive and blocking filesystem/lock operations using `spawn_blocking`.
-- Never hold registry locks across network `.await` calls.
-- Prefer explicit errors and deterministic behavior over implicit fallbacks.
+### Rust/async
+- Meaningful enums and `Result`; no `unwrap`/`expect` outside tests. Focused functions,
+  abstractions only for concrete needs, explicit errors over implicit fallbacks.
+- CPU-intensive work and blocking filesystem/locks use `spawn_blocking`.
+- Never hold registry locks across network `.await`.
 
-## 5. Verification Gate
+## Verification and authorization
 
-Before reporting implementation complete, run:
+Before reporting implementation complete, run and report each actual PASS/FAIL/BLOCKED:
 
-```bash
+```sh
 cargo fmt --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --locked -- --include-ignored
 cargo build --release --locked
 ```
 
-- If networking is restricted, reuse cached dependencies with `--offline`.
-- Report each check as passed, failed, or blocked with its actual result.
-- Distinguish mock verification from real Claude Code integration testing.
-- Never inspect existing credentials or run live authenticated tests without explicit authorization.
-- Do not claim success based solely on code changes.
-- Docker changes additionally require an image build and isolated Compose smoke (non-root, private persistent state, loopback publication, SIGINT shutdown). Use a unique project, disposable synthetic state and random host port; do not alter an existing user service.
+Use cached dependencies with `--offline` if needed. Code changes alone are not
+verification; distinguish mock tests from real Claude Code/subscription acceptance.
+Docker changes also require image build + isolated Compose smoke: non-root, private
+persistent state, loopback publication, SIGINT shutdown; unique project/disposable
+synthetic state/random host port, without altering an existing service.
 
-## 6. Constraints
-
-- Do not publish, push, or deploy without explicit authorization.
-- Preserve MIT attribution and reference sources when porting code.
-- Prefer minimal, targeted changes over unrelated refactoring.
-- When requirements conflict or a critical assumption is uncertain, explain the trade-off before making irreversible changes.
+Never inspect existing credentials, run live authenticated tests, publish, push or
+deploy without explicit authorization. Preserve MIT attribution/reference revisions.
+Prefer targeted changes; preserve unrelated user work.

@@ -1,33 +1,17 @@
-# Cài trên máy Ubuntu mới
+# Cài trên Ubuntu mới
 
-Áp dụng cho Ubuntu x64/ARM64 có systemd và quyền cài package. Claude Code và
-proxy chạy trên cùng máy. Cần Internet để clone/build, đăng nhập và gọi upstream.
-Các bước này cài một lần; sau đó vào project và chạy `claude`.
+Ubuntu x64/ARM64, Claude Code và proxy cùng máy; cần Internet và systemd user.
+Không sync credentials qua Git: máy mới đăng nhập account riêng của proxy.
+Docker thay thế: xem [README](../README.md#docker--không-cần-rust-trên-host).
 
-## 0. Source phải có trên GitHub
-
-Remote của project là `git@github.com:nghlong3004/llm-proxy.git`. Gắn remote không
-tự upload source. Commit/push source, Cargo.lock, packaging và scripts trước khi
-clone từ máy khác. Credential/state nằm ngoài repo; máy mới phải login lại.
-
-## 1. Cài công cụ build và Rust
+## 1. Build/install
 
 ```sh
 sudo apt-get update
 sudo apt-get install -y git curl ca-certificates build-essential pkg-config cmake python3
-
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
 rustup update stable
-```
-
-Dùng rustup để có Rust stable mới, không phụ thuộc bản rustc/cargo cũ trong apt.
-`rust-toolchain.toml` của repo chọn stable và components; manifest yêu cầu >=1.99.
-Hướng dẫn chính thức: https://rust-lang.org/tools/install/
-
-## 2. Clone và cài binary
-
-```sh
 git clone https://github.com/nghlong3004/llm-proxy.git
 cd llm-proxy
 cargo install --path . --locked --root "$HOME/.local"
@@ -35,50 +19,28 @@ export PATH="$HOME/.local/bin:$PATH"
 llm-proxy --version
 ```
 
-Nếu repo private, cấu hình quyền GitHub trên máy mới trước khi clone. Khi đã có
-SSH key được GitHub chấp nhận, có thể dùng
-`git clone git@github.com:nghlong3004/llm-proxy.git` thay cho HTTPS.
+Repo private cần quyền GitHub (hoặc clone SSH). Rust stable >=1.99, không dùng bản apt
+cũ; [installer chính thức](https://rust-lang.org/tools/install/). Nếu thiếu PATH, thêm
+dòng `export PATH="$HOME/.local/bin:$PATH"` một lần vào `~/.bashrc` hoặc `~/.zshrc`.
 
-Thêm dòng sau vào `~/.bashrc` để các terminal Bash mới cũng nhận binary; với Zsh
-thêm vào `~/.zshrc`. Không cần thêm lại nếu PATH đã có ~/.local/bin.
-
-```sh
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-## 3. Cài Claude Code và đăng nhập account của proxy
-
-Nếu chưa cài Claude Code:
+## 2. Claude Code và login
 
 ```sh
+# Nếu chưa cài Claude Code:
 curl -fsSL https://claude.ai/install.sh | bash
 claude --version
-```
-
-Hướng dẫn chính thức: https://code.claude.com/docs/en/setup
-Không cần cài Codex CLI. Đăng nhập ChatGPT bằng lệnh của proxy:
-
-```sh
-llm-proxy accounts login --name acc1
-# Thêm account khác nếu cần:
-llm-proxy accounts login --name acc2
+llm-proxy accounts login --name personal --login-method device-code
 llm-proxy accounts list
 ```
 
-`acc1`, `acc2` là tên gợi nhớ, không phải loại account. Trên Ubuntu Server/SSH
-không có browser local, dùng device code rồi mở URL được in trên máy có browser:
+[Claude installer](https://code.claude.com/docs/en/setup). Mở URL/code được in trong
+browser; device login có thể cần bật ở security/workspace settings. Máy desktop có
+thể bỏ `--login-method device-code` để dùng browser callback. Lặp login với tên khác
+để thêm account; không cần Codex CLI hoặc copy `~/.codex/auth.json`.
 
-```sh
-llm-proxy accounts login --name acc1 --login-method device-code
-```
+## 3. Chạy nền
 
-Device login có thể cần bật trong security/workspace settings của account.
-Không copy credential vào Git. Account đăng nhập trên máy cũ không tự đồng bộ
-sang máy mới khi clone repo.
-
-## 4. Chạy nền
-
-Trong thư mục repo vừa clone:
+Trong repo, dừng foreground cùng cổng trước:
 
 ```sh
 install -D -m 644 packaging/systemd/llm-proxy.service ~/.config/systemd/user/llm-proxy.service
@@ -88,37 +50,30 @@ systemctl --user status llm-proxy --no-pager
 curl --fail http://127.0.0.1:18765/health
 ```
 
-Health cần status=ok và ready=true sau khi có account usable. Đây chỉ là readiness,
-không kiểm tra quyền sử dụng model. Unit mẫu dùng gpt-6.1-sol; chọn model account
-có quyền dùng khi thay ExecStart bằng `systemctl --user edit llm-proxy`, rồi restart.
-Nếu đang chạy `llm-proxy serve` trong terminal, dừng instance đó trước để nhường cổng.
+Health status=ok/ready=true chỉ chứng minh readiness, không quyền model/inference.
+Unit dùng `gpt-6.1-sol`; đổi flags qua `systemctl --user edit llm-proxy`, rồi restart.
+Không expose listener ra public vì chưa có client authentication. Không có systemd
+thì chạy `llm-proxy serve --default-model gpt-6.1-sol` bằng supervisor riêng.
 
-Trên server cần tiếp tục chạy sau khi logout SSH hoặc tự chạy khi máy boot mà
-chưa login, có thể bật linger riêng cho user chạy proxy:
+SSH server cần chạy sau logout/boot có thể tùy chọn `sudo loginctl enable-linger
+"$USER"`; đây là thay đổi lifecycle user manager, không cần cho desktop thông thường.
 
-```sh
-sudo loginctl enable-linger "$USER"
-```
+## 4. Cấu hình client
 
-Đây là tùy chọn thay đổi lifecycle user manager; không cần cho phiên desktop
-thông thường. Container/minimal Ubuntu không có systemd user manager cần chạy
-`llm-proxy serve --default-model gpt-6.1-sol` bằng supervisor của môi trường đó.
-
-## 5. Lưu cấu hình Claude Code một lần
-
-Đoạn sau merge bốn biến vào settings user, giữ nguyên key/env khác. Nếu file đã
-có, lưu một backup private trước lần thay đổi đầu tiên. Không in nội dung settings.
-Chạy bằng user sẽ dùng Claude Code, không chạy với sudo.
+Chạy **không sudo**, bằng user dùng Claude Code. Snippet merge năm env, giữ các key
+khác, backup private một lần, atomic replace; từ chối JSON sai kiểu/symlink hoặc
+phát hiện file đổi trong lúc chạy. Không in settings/credential. Chỉ chạy khi muốn
+proxy là mặc định user-wide; project settings vẫn có thể override.
 
 ```sh
-python3 - <<'PY'
+python3 -I - <<'PY'
 import json
 import os
 import tempfile
 from pathlib import Path
 
 root = Path((os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude"))).expanduser()
-root.mkdir(parents=True, exist_ok=True)
+root.mkdir(mode=0o700, parents=True, exist_ok=True)
 path = root / "settings.json"
 if path.is_symlink():
     raise SystemExit("Settings là symlink; hãy sửa file đích trực tiếp")
@@ -132,6 +87,7 @@ settings["env"] = {
     "ANTHROPIC_AUTH_TOKEN": "local",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
+    "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
 }
 backup = root / "settings.json.before-llm-proxy"
 if original is not None and not backup.exists():
@@ -155,39 +111,25 @@ print("Đã cấu hình Claude Code dùng llm-proxy")
 PY
 ```
 
-Mở lại Claude Code nếu đang có phiên cũ. Cấu hình project có thể ghi đè user env;
-kiểm tra `/status` nếu base URL không phải localhost:18765.
+Mở phiên mới, vào project rồi `claude`. Nếu gateway không đúng, kiểm tra `/status`
+và project overrides. `local` chỉ là giá trị client yêu cầu, không xác thực listener.
+Auto mode cần `CLAUDE_CODE_AUTO_MODE_SERVER=0` ở client; reviewer mặc định Luna,
+main Sol giữ nguyên. [Cấu hình/giới hạn review](../README.md#auto-mode-route-classifier-riêng).
 
-## Dùng hằng ngày
-
-```sh
-cd /duong/dan/project
-claude
-```
-
-Proxy chạy nền, account routing tự xử lý. Các lệnh quản lý:
+## Quản lý / cập nhật
 
 ```sh
 systemctl --user restart llm-proxy
 systemctl --user stop llm-proxy
 systemctl --user start llm-proxy
 journalctl --user -u llm-proxy -f
-```
-
-## Cập nhật source và binary
-
-```sh
-cd /duong/dan/llm-proxy
+# Trong repository, cập nhật binary rồi restart:
 git pull --ff-only
 cargo install --path . --locked --force --root "$HOME/.local"
 systemctl --user restart llm-proxy
 ```
 
-Nếu release đổi unit, copy lại file service và daemon-reload trước restart.
-Không cần login lại khi chỉ cập nhật binary; login lại nếu credential bị thu hồi.
-
-## Phạm vi kiểm chứng
-
-Các lệnh CLI và unit đã được kiểm tra trên máy phát triển Ubuntu/WSL; JSON merge
-được kiểm tra với thư mục tạm. Chưa chạy toàn bộ hướng dẫn từ một Ubuntu VM sạch
-và chưa xác nhận inference/account entitlement chỉ từ health hoặc test mock.
+Nếu unit đổi, copy lại + daemon-reload trước restart. Đổi binary không cần login
+lại, trừ credential bị thu hồi. Config state xem [README](../README.md#config-và-account-policy).
+CLI/unit và settings merge được kiểm tra bằng state giả trên Ubuntu/WSL; chưa có
+full clean-VM acceptance hoặc live entitlement/inference acceptance.

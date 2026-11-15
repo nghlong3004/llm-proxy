@@ -1,64 +1,34 @@
-# Quy ước đặt tên
+# Quy ước
 
-Thư mục đặt theo trách nhiệm cụ thể, dùng danh từ tiếng Anh đầy đủ, `snake_case`;
-không dùng `core`, `common`, `utils` để gom code không liên quan.
+## Tên và CLI
 
-| Vị trí | Trách nhiệm |
-| --- | --- |
-| `domain` | Request/content/event/lỗi dùng chung, không chứa wire schema |
-| `protocols` | Giao thức mà coding agent gửi vào; Adapter |
-| `providers` | Dịch vụ LLM nhận request; Strategy và registry |
-| `providers/codex` | Implementation riêng của Codex subscription |
-| `accounts` | Account registry, private storage, chính sách chọn account |
-| `authentication` | OAuth và refresh, không liên quan incoming auth header |
-| `server` | HTTP transport, routing, cancellation |
-| `cli` | Khai báo lệnh và khởi tạo các thành phần |
-| `logging` | Ghi metadata và xoay log |
-
-Một account có `provider` và `name`. `default_provider`, `default_model`,
-`listen_port`, `log_level` là key TOML. Các trường cũ `backend`, `label`,
-`default_backend`, `port` chỉ được nhận khi đọc state/config đã có;
-serialize và tài liệu luôn dùng tên mới. `listen_address` là IP (mặc định
-`127.0.0.1`); CLI tương ứng `--listen-address`, Docker override thành `0.0.0.0`
-trong container nhưng publish host vẫn loopback.
-
-CLI theo dạng `resource action`; flag dài dùng `kebab-case`, tương ứng key
-`snake_case` khi có cấu hình tương đương. Giá trị hữu hạn dùng enum dễ đọc.
+- Module theo trách nhiệm, danh từ tiếng Anh `snake_case`; không gom vào
+  `core/common/utils`. Bản đồ module chỉ duy trì tại [architecture](architecture.md).
+- CLI `resource action`, flag `kebab-case`, key TOML `snake_case`, giá trị hữu hạn
+  dùng enum. Account có `provider`, `name`; TOML có `default_provider`,
+  `default_model`, `listen_address`, `listen_port`, `log_level`.
+- Aliases đọc state/config cũ: `backend`, `label`, `default_backend`, `port`;
+  serialize/docs dùng tên mới. Chưa phát hành nên không giữ flag CLI cũ.
+- Wire URL/field upstream giữ spelling gốc, không đổi theo tên module Rust.
 
 ```text
 llm-proxy --state-dir PATH accounts login --name NAME --login-method browser
 llm-proxy accounts login --name NAME --login-method device-code
 llm-proxy accounts list --output-format json
 llm-proxy accounts remove ACCOUNT_ID
-llm-proxy serve --default-model MODEL_ID --listen-address IP_ADDRESS --listen-port PORT
+llm-proxy serve --default-model MODEL --listen-address IP --listen-port PORT
 ```
 
-`--state-dir` là global, env `LLM_PROXY_STATE_DIR`; không gọi là data-dir vì
-thư mục chứa cả config, account state, credential và log. Chưa phát hành nên
-không duy trì alias cho flag CLI cũ. Endpoint/field của API upstream giữ nguyên
-wire spelling; đổi tên module Rust không được đổi URL hay schema của provider.
+`--state-dir` global, env `LLM_PROXY_STATE_DIR`, chứa config/accounts/credentials/logs.
+`listen_address` là IP, native default loopback; wildcard chỉ explicit trong container.
+`[auto_review]` mặc định model Luna, provider kế thừa default; explicit model/alias
+vẫn override. Client `CLAUDE_CODE_AUTO_MODE_SERVER=0` không phải server config.
 
-## Quan hệ với source tham khảo
+## Nguồn tham khảo
 
-`domain` (trước đây là `core.rs`) là hợp đồng do project này thiết kế để tách
-agent protocol khỏi provider. Đây không phải một “core” chép từ hai repository.
-
-- `raine/claude-code-proxy`: tham khảo hành vi OAuth, native headers,
-  Responses/lane, mapping tool/ảnh/reasoning/search và event streaming.
-- `kapybara-org/zerosub`: tham khảo account identity, quota và ràng buộc reasoning
-  khi đổi account. Không chép source ZeroSub.
-
-Không bê agent runtime vào proxy. Claude Code thực thi tool và agent loop;
-proxy chuyển giao thức và chọn account/provider. Revision nguồn port được ghi
-ở `src/providers/codex/schema.rs` và `tests/fixtures/codex/README.md`;
-MIT attribution ở `LICENSE` (cũng được copy vào runtime image).
-
-## Client classifier routing
-
-`[auto_review]` trong TOML có hai optional keys `provider`, `model`; mỗi field
-kế thừa độc lập tuyến mặc định/requested model khi bỏ qua. Neutral enum
-`RequestPurpose` dùng `Conversation`/`ActionReview`; exact client prompt nhận diện
-ở ProtocolAdapter, không rò sang domain/server policy. `RequestRoutingPolicy` là
-Strategy provider-neutral, implementation config ở `server/request_policy.rs`.
-JEV chưa implement; không ghi provider đó vào config trước khi có registration
-thật. Biến `CLAUDE_CODE_AUTO_MODE_SERVER=0` thuộc process client, không phải server.
+`domain` là contract project tự thiết kế, không phải “core” chép từ reference.
+`raine/claude-code-proxy` tham khảo OAuth/native headers/Responses lanes/translation;
+`kapybara-org/zerosub` tham khảo identity/quota/account-bound reasoning, không port
+source ZeroSub. Không mang agent runtime vào proxy. Revision source port nằm trong
+`src/providers/codex/schema.rs` và [fixture provenance](../tests/fixtures/codex/README.md),
+MIT attribution giữ ở [LICENSE](../LICENSE), cũng ship trong runtime image.
