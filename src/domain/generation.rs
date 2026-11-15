@@ -206,6 +206,43 @@ impl RequestPurpose {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReasoningEffort {
+    None,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+impl std::str::FromStr for ReasoningEffort {
+    type Err = ProxyError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "none" => Ok(Self::None),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
+            _ => Err(ProxyError::invalid("Unsupported reasoning effort")
+                .with_code("invalid_reasoning_effort")),
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub struct GenerationRequest {
     pub purpose: RequestPurpose,
@@ -215,7 +252,7 @@ pub struct GenerationRequest {
     pub tools: Vec<Tool>,
     pub tool_choice: ToolChoice,
     pub parallel_tools: bool,
-    pub effort: String,
+    pub effort: Option<ReasoningEffort>,
     pub output_format: Option<Value>,
     pub stream: bool,
     pub compact: bool,

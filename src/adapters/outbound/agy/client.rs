@@ -1,15 +1,19 @@
 //! Cancellable native HTTP provider; the only automatic replay follows a definite HTTP 401.
 use super::{error, reasoning::ReasoningSigner, request, stream::Translator};
 use crate::{
-    accounts::{Account, Credential, Store},
+    accounts::{Credential, Store},
     adapters::outbound::{http::read_bounded, sse::Decoder},
     authentication::{AuthClient, RefreshError},
     config::Config,
     domain::{
         EventStream, GenerationRequest, RequestContext,
+        account::AccountIdentity,
         error::{FailureKind, ProxyError},
     },
-    ports::llm_provider::Provider,
+    ports::{
+        llm_provider::Provider,
+        request_routing::{RequestRoute, RouteOptions},
+    },
 };
 use axum::body::Bytes;
 use futures_util::{StreamExt, future::BoxFuture};
@@ -100,16 +104,14 @@ impl Agy {
     async fn start(
         self,
         request: Arc<GenerationRequest>,
-        account: Account,
+        route: Arc<RequestRoute>,
+        account: AccountIdentity,
         context: RequestContext,
     ) -> Result<EventStream, ProxyError> {
+        self.validate_request(&request, &route)?;
         if account.provider != "agy" {
             return Err(ProxyError::invalid("AGY requires an AGY account"));
         }
-        let model = self
-            .config
-            .resolve(&request.model)
-            .map_err(|_| ProxyError::invalid("Unknown AGY model").with_code("unknown_model"))?;
         let permit = self.preparation.clone().try_acquire_owned().map_err(|_| {
             ProxyError::new(
                 503,
@@ -123,7 +125,7 @@ impl Agy {
         let config = self.config.clone();
         let signer = self.signer.clone();
         let prepared_context = context.clone();
-        let canonical = model.id.clone();
+        let canonical = route.model.clone();
         let (body, session) = tokio::task::spawn_blocking(move || {
             // An uncancellable blocking job owns its capacity until it actually completes.
             let _permit = permit;
@@ -158,7 +160,7 @@ impl Agy {
             "{}/v1internal:streamGenerateContent?alt=sse",
             self.config.agy_endpoint.trim_end_matches('/'),
         );
-        let thinking = model.id.starts_with("claude-") && model.id.ends_with("-thinking");
+        let thinking = route.model.starts_with("claude-") && route.model.ends_with("-thinking");
         let mut response = self
             .send(&url, &body, &credential, &session, thinking)
             .await?;
@@ -206,7 +208,7 @@ impl Agy {
         }
         let mut translator = Translator::new(
             request.model.clone(),
-            model.id,
+            route.model.clone(),
             account.id,
             credential.generation,
             self.signer,
@@ -253,18 +255,31 @@ impl Provider for Agy {
         Box::pin(self.auth.shutdown())
     }
 
+    fn validate_request(
+        &self,
+        request: &GenerationRequest,
+        route: &RequestRoute,
+    ) -> Result<(), ProxyError> {
+        if route.provider != "agy" || route.options != RouteOptions::Standard {
+            return Err(ProxyError::invalid("AGY route provider/options mismatch")
+                .with_code("invalid_request_route"));
+        }
+        request::validate(request, &route.model)
+    }
+
     fn generate(
         &self,
         request: Arc<GenerationRequest>,
-        account: Account,
+        route: Arc<RequestRoute>,
+        account: AccountIdentity,
         context: RequestContext,
     ) -> BoxFuture<'static, Result<EventStream, ProxyError>> {
         let this = self.clone();
-        Box::pin(async move { this.start(request, account, context).await })
+        Box::pin(async move { this.start(request, route, account, context).await })
     }
 }
 
-fn validate_identity(credential: &Credential, account: &Account) -> Result<(), ProxyError> {
+fn validate_identity(credential: &Credential, account: &AccountIdentity) -> Result<(), ProxyError> {
     if credential.generation != account.generation || credential.account_id != account.workspace {
         return Err(account_changed());
     }

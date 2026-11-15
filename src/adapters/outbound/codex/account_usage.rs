@@ -3,8 +3,9 @@
 //! Wire fields follow openai/codex@ee344ca9458351a6ea102795fa73110ad3ede5dc,
 //! backend-client/src/{types.rs,client/rate_limit_resets.rs}. No spending/Reserve opt-in.
 use crate::{
-    accounts::{Account, Credential, Store},
+    accounts::{Credential, Store},
     authentication::{AuthClient, RefreshError},
+    domain::account::AccountIdentity,
     domain::account_usage::{
         Metric, PrepaidCredits, ResetCredits, ResetDispatchError, ResetOutcome, UsageCapabilities,
         UsageData, UsageError, UsageRead, UsageWindow,
@@ -69,7 +70,7 @@ impl AccountUsageProvider for CodexAccountUsage {
     fn decode_cached(&self, snapshot: &Value) -> Result<UsageData, UsageError> {
         decode(snapshot).map(|(_, data)| data)
     }
-    fn read(&self, account: Account) -> BoxFuture<'_, Result<UsageRead, UsageError>> {
+    fn read(&self, account: AccountIdentity) -> BoxFuture<'_, Result<UsageRead, UsageError>> {
         Box::pin(async move {
             let live = self.live.as_ref().ok_or(UsageError::Unsupported)?;
             let credential = live.credential(&account).await?;
@@ -108,7 +109,7 @@ impl AccountUsageProvider for CodexAccountUsage {
     }
     fn reset(
         &self,
-        account: Account,
+        account: AccountIdentity,
         request_id: String,
     ) -> BoxFuture<'_, Result<ResetOutcome, ResetDispatchError>> {
         Box::pin(async move {
@@ -160,7 +161,7 @@ impl AccountUsageProvider for CodexAccountUsage {
     }
 }
 impl Live {
-    async fn credential(&self, account: &Account) -> Result<Credential, UsageError> {
+    async fn credential(&self, account: &AccountIdentity) -> Result<Credential, UsageError> {
         if account.provider != "codex" {
             return Err(UsageError::ProviderMismatch);
         }

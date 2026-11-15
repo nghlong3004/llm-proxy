@@ -1,4 +1,5 @@
 //! Configuration and explicit model routing, independent of account selection.
+use crate::ports::request_routing::{CodexOptions, RequestRoute, RouteOptions, ServiceTier};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -7,6 +8,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const DEFAULT_CODEX_EFFORT: crate::domain::ReasoningEffort =
+    crate::domain::ReasoningEffort::Medium;
 pub const CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub const CODEX_ACCOUNT_ENDPOINT: &str = "https://chatgpt.com/backend-api";
 pub const AGY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
@@ -88,14 +91,6 @@ pub struct ModelPolicy {
     pub responses_lite: Option<bool>,
     pub search_model: Option<String>,
 }
-#[derive(Clone, Debug)]
-pub struct ResolvedModel {
-    pub id: String,
-    pub provider: String,
-    pub responses_lite: bool,
-    pub service_tier: Option<String>,
-    pub search_model: String,
-}
 impl Config {
     pub fn load(directory: &Path) -> Result<Self> {
         let path = directory.join("config.toml");
@@ -153,68 +148,82 @@ impl Config {
             if model.trim().is_empty() {
                 bail!("auto_review.model cannot be empty");
             }
-            self.resolve(model).context("Invalid auto_review.model")?;
+            self.resolve_route(model, self.auto_review.provider.as_deref())
+                .context("Invalid auto_review.model")?;
         }
         Ok(())
     }
-    pub fn resolve(&self, requested: &str) -> Result<ResolvedModel> {
+    /// Recognize aliases and registered models without provider capability or account checks.
+    pub fn recognize_model(&self, requested: &str) -> Result<()> {
+        self.model_target(requested).map(|_| ())
+    }
+
+    fn model_target<'a>(&'a self, requested: &'a str) -> Result<&'a str> {
         let requested = requested.strip_suffix("[1m]").unwrap_or(requested);
-        let target = if let Some(target) = self.aliases.get(requested) {
-            target.as_str()
+        if let Some(target) = self.aliases.get(requested) {
+            Ok(target)
         } else if self.models.contains_key(requested)
             || self.default_model.as_deref() == Some(requested)
         {
             // An explicitly registered native model wins over the generic Claude alias.
-            requested
+            Ok(requested)
         } else if is_claude_alias(requested) {
             self.default_model
                 .as_deref()
-                .context("No default model configured")?
+                .context("No default model configured")
         } else if self.catalog().contains(requested)
-            || self.catalog().contains(
-                requested
-                    .strip_suffix("-ultrafast")
-                    .or_else(|| requested.strip_suffix("-fast"))
-                    .unwrap_or(requested),
-            )
+            || self.catalog().contains(base_model(requested))
         {
-            requested
+            Ok(requested)
         } else {
-            bail!("Unknown model '{requested}'; use GET /v1/models or configure a model alias");
-        };
-        let provider = self
+            bail!("Unknown model '{requested}'; use GET /v1/models or configure a model alias")
+        }
+    }
+
+    /// Resolve the final provider before applying provider-specific model normalization.
+    pub fn resolve_route(
+        &self,
+        requested: &str,
+        provider_override: Option<&str>,
+    ) -> Result<RequestRoute> {
+        let target = self.model_target(requested)?;
+        let policy = self
             .models
             .get(target)
-            .or_else(|| {
-                let base = target
-                    .strip_suffix("-ultrafast")
-                    .or_else(|| target.strip_suffix("-fast"))?;
-                self.models.get(base)
-            })
-            .and_then(|policy| policy.provider.as_deref())
+            .or_else(|| self.models.get(base_model(target)));
+        let provider = provider_override
+            .or_else(|| policy.and_then(|policy| policy.provider.as_deref()))
             .unwrap_or(&self.default_provider);
-        let (id, tier) = if provider != "codex" {
-            (target, None)
-        } else if let Some(id) = target.strip_suffix("-ultrafast") {
-            (id, Some("ultrafast"))
+        if provider.trim().is_empty() || target.trim().is_empty() {
+            bail!("Request route provider and model must not be empty");
+        }
+        if provider != "codex" {
+            return Ok(RequestRoute {
+                provider: provider.into(),
+                model: target.into(),
+                options: RouteOptions::Standard,
+            });
+        }
+        let (id, service_tier) = if let Some(id) = target.strip_suffix("-ultrafast") {
+            (id, Some(ServiceTier::Ultrafast))
         } else if let Some(id) = target.strip_suffix("-fast") {
-            (id, Some("priority"))
+            (id, Some(ServiceTier::Priority))
         } else {
             (target, None)
         };
-        let policy = self.models.get(id).cloned().unwrap_or_default();
-        let responses_lite = policy
-            .responses_lite
-            .unwrap_or_else(|| id.starts_with("gpt-5.6-") || id.starts_with("gpt-6"));
-        let search_model = policy
-            .search_model
-            .unwrap_or_else(|| id.replace("-luna", "-sol"));
-        Ok(ResolvedModel {
-            id: id.into(),
+        let options = CodexOptions {
+            responses_lite: policy
+                .and_then(|policy| policy.responses_lite)
+                .unwrap_or_else(|| id.starts_with("gpt-5.6-") || id.starts_with("gpt-6")),
+            service_tier,
+            search_model: policy
+                .and_then(|policy| policy.search_model.clone())
+                .unwrap_or_else(|| id.replace("-luna", "-sol")),
+        };
+        Ok(RequestRoute {
             provider: provider.into(),
-            responses_lite,
-            service_tier: tier.map(str::to_owned),
-            search_model,
+            model: id.into(),
+            options: RouteOptions::Codex(options),
         })
     }
     pub fn catalog(&self) -> BTreeSet<String> {
@@ -226,6 +235,11 @@ impl Config {
         models.extend(["haiku", "sonnet", "opus", "fable"].map(str::to_owned));
         models
     }
+}
+fn base_model(id: &str) -> &str {
+    id.strip_suffix("-ultrafast")
+        .or_else(|| id.strip_suffix("-fast"))
+        .unwrap_or(id)
 }
 fn is_claude_alias(id: &str) -> bool {
     ["haiku", "sonnet", "opus", "fable"]
@@ -268,17 +282,28 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            c.resolve("claude-sonnet-4-6[1m]").unwrap().id,
+            c.resolve_route("claude-sonnet-4-6[1m]", None)
+                .unwrap()
+                .model,
             "gpt-6.1-sol"
         );
-        assert!(c.resolve("made-up-model").is_err());
-        assert_eq!(c.resolve("gpt-5.4").unwrap().id, "gpt-5.4");
+        assert!(c.resolve_route("made-up-model", None).is_err());
+        assert_eq!(c.resolve_route("gpt-5.4", None).unwrap().model, "gpt-5.4");
     }
     #[test]
     fn custom_models_and_lane_policy_are_explicit() {
         let c: Config = toml::from_str("default_model = 'custom-codex'\n[models.custom-codex]\nresponses_lite = false\n[aliases]\nsmall = 'custom-codex'\n").unwrap();
-        assert_eq!(c.resolve("small").unwrap().id, "custom-codex");
-        assert!(!c.resolve("custom-codex").unwrap().responses_lite);
+        assert_eq!(
+            c.resolve_route("small", None).unwrap().model,
+            "custom-codex"
+        );
+        assert!(matches!(
+            c.resolve_route("custom-codex", None).unwrap().options,
+            RouteOptions::Codex(CodexOptions {
+                responses_lite: false,
+                ..
+            })
+        ));
     }
     #[test]
     fn listen_address_defaults_to_loopback_and_can_be_explicitly_set_for_containers() {

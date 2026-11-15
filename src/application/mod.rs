@@ -5,15 +5,14 @@ pub mod account_usage;
 pub mod request_routing;
 
 use crate::{
-    accounts::{AccountStatus, Store, now},
     config::Config,
     domain::{
         EventStream, GenerationEvent, GenerationRequest, RequestContext, RequestPurpose,
-        error::ProxyError,
+        account::AccountStatus, error::ProxyError, time::now,
     },
     ports::{
-        llm_provider::ProviderRegistry, request_routing::RequestRoutingPolicy,
-        token_estimator::TokenEstimator,
+        account_repository::InferenceAccountRepository, llm_provider::ProviderRegistry,
+        request_routing::RequestRoutingPolicy, token_estimator::TokenEstimator,
     },
 };
 use futures_util::StreamExt;
@@ -26,7 +25,7 @@ pub type WorkPermit = Arc<OwnedSemaphorePermit>;
 
 #[derive(Clone)]
 pub struct Application {
-    pub store: Store,
+    pub store: Arc<dyn InferenceAccountRepository>,
     pub config: Arc<Config>,
     pub providers: ProviderRegistry,
     pub request_policy: Arc<dyn RequestRoutingPolicy>,
@@ -42,8 +41,8 @@ pub struct HealthStatus {
     pub provider: String,
 }
 impl Application {
-    pub fn new(
-        store: Store,
+    pub fn new<R: InferenceAccountRepository + 'static>(
+        store: R,
         config: Config,
         providers: ProviderRegistry,
         token_estimator: Arc<dyn TokenEstimator>,
@@ -52,7 +51,7 @@ impl Application {
         let request_policy = Arc::new(ConfiguredRequestRoutingPolicy::new(config.clone()));
         let (shutdown, _) = watch::channel(false);
         Self {
-            store,
+            store: Arc::new(store),
             config,
             providers,
             request_policy,
@@ -66,22 +65,16 @@ impl Application {
     /// Complete preflight before returning a lazy stream, preserving pre-SSE errors.
     pub async fn generate(
         &self,
-        mut request: GenerationRequest,
+        request: GenerationRequest,
         mut context: RequestContext,
         permit: WorkPermit,
     ) -> Result<EventStream, ProxyError> {
         self.config
-            .resolve(&request.model)
+            .recognize_model(&request.model)
             .map_err(|error| ProxyError::invalid(error.to_string()).with_code("unknown_model"))?;
-        let route = self.request_policy.route(&request)?;
-        if request.purpose == RequestPurpose::ActionReview
-            || route.provider != self.config.default_provider
-        {
-            self.providers.get(&route.provider)?;
-        }
-        self.config
-            .resolve(&route.model)
-            .map_err(|error| ProxyError::invalid(error.to_string()).with_code("unknown_model"))?;
+        let route = Arc::new(self.request_policy.route(&request)?);
+        let provider = self.providers.get(&route.provider)?;
+        provider.validate_request(&request, &route)?;
         let requested_model = request.model.clone();
         tracing::debug!(
             request_id = %context.request_id,
@@ -91,8 +84,6 @@ impl Application {
             provider = %route.provider,
             event = "request_route_selected"
         );
-        let model_overridden = route.model != requested_model;
-        request.model = route.model.clone();
         if request.purpose == RequestPurpose::ActionReview {
             context.session_id = None;
         }
@@ -104,9 +95,7 @@ impl Application {
             store.select_for_provider_at(&provider_name, &std::collections::HashSet::new(), now())
         })
         .await
-        .map_err(|_| ProxyError::storage())??
-        .account;
-        self.providers.get(&route.provider)?;
+        .map_err(|_| ProxyError::storage())??;
         Ok(account_failover::generate(
             self.clone(),
             Arc::new(request),
@@ -119,7 +108,7 @@ impl Application {
             event.map(|event| match event {
                 GenerationEvent::Start {
                     id, input_tokens, ..
-                } if model_overridden => GenerationEvent::Start {
+                } => GenerationEvent::Start {
                     id,
                     input_tokens,
                     model: requested_model.clone(),
@@ -135,7 +124,7 @@ impl Application {
         permit: WorkPermit,
     ) -> Result<u64, ProxyError> {
         self.config
-            .resolve(&request.model)
+            .recognize_model(&request.model)
             .map_err(|error| ProxyError::invalid(error.to_string()).with_code("unknown_model"))?;
         let estimator = self.token_estimator.clone();
         tokio::task::spawn_blocking(move || {

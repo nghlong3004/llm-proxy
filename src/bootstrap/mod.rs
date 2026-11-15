@@ -1,6 +1,6 @@
 //! Composition root for concrete adapters and the proxy process lifecycle.
 use crate::{
-    accounts::{Account, Store},
+    accounts::{Account, Registry, Store},
     adapters::{
         inbound::http::{AppState, anthropic::Anthropic, router},
         outbound::{
@@ -28,6 +28,11 @@ pub enum LoginMethod {
 pub async fn open_store(state_dir: Option<PathBuf>) -> Result<Store> {
     let directory = state_dir.map(Ok).unwrap_or_else(config::state_dir)?;
     tokio::task::spawn_blocking(move || Store::open(directory)).await?
+}
+
+/// Legacy raw list serialization remains at the concrete CLI composition boundary.
+pub async fn list_accounts(store: Store) -> Result<Registry> {
+    tokio::task::spawn_blocking(move || store.list()).await?
 }
 
 pub async fn login(store: Store, name: String, method: LoginMethod) -> Result<Account> {

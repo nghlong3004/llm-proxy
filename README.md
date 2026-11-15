@@ -240,6 +240,12 @@ Gemini hiện chỉ hỗ trợ text/ảnh; function tools của Gemini, hosted s
 structured output và forced tool choice chưa hỗ trợ sẽ trả lỗi trước dispatch.
 Schema tools có constraint phong phú được giữ nguyên qua `parametersJsonSchema` thay vì
 bị bỏ constraint; khả năng chấp nhận trường này trên API nội bộ chưa được kiểm live.
+AGY chưa có mapping reasoning effort đã xác minh: nếu gửi `output_config.effort` hoặc
+`reasoning_effort` explicit (`none`, `low`, `medium`, `high`, `xhigh`, `max`), request sẽ
+trả lỗi `unsupported_reasoning_effort` trước chọn account/gọi provider, không âm thầm bỏ qua.
+Bỏ hẳn effort thì giữ policy hiện tại: Claude `-thinking` dùng `agy_thinking_budget`,
+model khác không tự thêm thinking budget. Client tự gửi effort sẽ cần bỏ trường đó hoặc
+chọn route Codex; proxy không tự đổi model/provider để né lỗi.
 Token count vẫn là ước lượng local, không phải tokenizer/quota chính thức của Google.
 
 `accounts status agy` chỉ đọc metadata offline. Usage live và banked quota reset của AGY

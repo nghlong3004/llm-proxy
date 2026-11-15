@@ -73,6 +73,14 @@ registration does not establish Antigravity entitlement.
   Reference: [Google FunctionDeclaration](https://aistudio.google.com/api-reference/caching).
   Do not route Auto-mode structured classifiers to
   AGY; use an explicitly configured Codex review route or another supported setup.
+- Explicit reasoning effort (`output_config.effort` or `reasoning_effort`) is not
+  silently discarded. Every explicit finite effort value currently returns
+  `unsupported_reasoning_effort` before account selection/credential exchange/inference;
+  no unverified effort-to-budget mapping is invented. Omission is different from
+  explicit `medium` or `none`: omitted effort preserves the existing `-thinking`
+  model/config budget policy. Clients that automatically send effort need to omit
+  it for AGY or select a provider that supports that control. Token counting remains
+  independent of generation capability validation.
 - Canonical IDs are explicitly configured. Dynamic model discovery is not performed;
   availability and naming can change independently of first-party API model IDs.
 - Output/thinking caps in config are local policy, not verified provider limits.

@@ -4,18 +4,32 @@ use super::{
     reasoning::ReasoningSigner,
     schema::{normalize_strict_json_schema, strip_tool_schema_patterns},
 };
-use crate::{config::ResolvedModel, domain::error::ProxyError, domain::*};
+use crate::{
+    config::DEFAULT_CODEX_EFFORT,
+    domain::error::ProxyError,
+    domain::*,
+    ports::request_routing::{RequestRoute, RouteOptions},
+};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 
 pub fn translate(
     request: &GenerationRequest,
-    model: &ResolvedModel,
+    route: &RequestRoute,
     account: &str,
     generation: &str,
     signer: &ReasoningSigner,
     session: Option<&str>,
 ) -> Result<Value, ProxyError> {
+    let RouteOptions::Codex(model) = &route.options else {
+        return Err(ProxyError::invalid("Codex requires Codex route options")
+            .with_code("invalid_request_route"));
+    };
+    if route.provider != "codex" {
+        return Err(
+            ProxyError::invalid("Codex route provider mismatch").with_code("invalid_request_route")
+        );
+    }
     let hosted_search = request
         .tools
         .iter()
@@ -24,7 +38,7 @@ pub fn translate(
     let actual_model = if hosted_search {
         model.search_model.as_str()
     } else {
-        model.id.as_str()
+        route.model.as_str()
     };
     let mut input = vec![];
     for message in &request.messages {
@@ -153,13 +167,16 @@ pub fn translate(
         body["prompt_cache_key"] = json!(session);
     }
     if let Some(tier) = &model.service_tier {
-        body["service_tier"] = json!(tier);
+        body["service_tier"] = json!(tier.as_str());
     }
-    let effort = if request.compact && !["none", "low"].contains(&request.effort.as_str()) {
-        "low"
-    } else {
-        &request.effort
-    };
+    let effort = request.effort.unwrap_or(DEFAULT_CODEX_EFFORT);
+    let effort =
+        if request.compact && !matches!(effort, ReasoningEffort::None | ReasoningEffort::Low) {
+            ReasoningEffort::Low
+        } else {
+            effort
+        }
+        .as_str();
     if effort != "none" {
         body["reasoning"] = json!({"effort":effort,"summary":"auto"});
         body["include"] = json!(["reasoning.encrypted_content"]);

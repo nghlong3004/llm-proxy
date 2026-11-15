@@ -23,10 +23,16 @@ fn native_claude_registration_wins_over_legacy_claude_fallback() {
          [aliases]\nsonnet = 'claude-sonnet-4-6'\n",
     );
     assert_eq!(
-        config.resolve("claude-sonnet-4-6[1m]").unwrap().id,
+        config
+            .resolve_route("claude-sonnet-4-6[1m]", None)
+            .unwrap()
+            .model,
         "claude-sonnet-4-6"
     );
-    assert_eq!(config.resolve("opus").unwrap().id, "gpt-6.1-sol");
+    assert_eq!(
+        config.resolve_route("opus", None).unwrap().model,
+        "gpt-6.1-sol"
+    );
     let policy = ConfiguredRequestRoutingPolicy::new(Arc::new(config));
     let request = Anthropic
         .decode(json!({
@@ -35,7 +41,7 @@ fn native_claude_registration_wins_over_legacy_claude_fallback() {
         .unwrap();
     let route = policy.route(&request).unwrap();
     assert_eq!(route.provider, "agy");
-    assert_eq!(route.model, "sonnet");
+    assert_eq!(route.model, "claude-sonnet-4-6");
 }
 
 #[test]
@@ -83,17 +89,21 @@ fn provider_specific_suffixes_are_not_treated_as_codex_service_tiers() {
          [models.'native-fast']\nprovider = 'agy'\n\
          [models.'gpt-5.5']\nprovider = 'codex'\n",
     );
-    let agy = config.resolve("native-fast").unwrap();
-    assert_eq!(agy.id, "native-fast");
-    assert!(agy.service_tier.is_none());
+    let agy = config.resolve_route("native-fast", None).unwrap();
+    assert_eq!(agy.model, "native-fast");
     assert_eq!(
-        config
-            .resolve("gpt-5.5-fast")
-            .unwrap()
-            .service_tier
-            .as_deref(),
-        Some("priority")
+        agy.options,
+        llm_proxy::ports::request_routing::RouteOptions::Standard
     );
+    assert!(matches!(
+        config.resolve_route("gpt-5.5-fast", None).unwrap().options,
+        llm_proxy::ports::request_routing::RouteOptions::Codex(
+            llm_proxy::ports::request_routing::CodexOptions {
+                service_tier: Some(llm_proxy::ports::request_routing::ServiceTier::Priority),
+                ..
+            }
+        )
+    ));
 }
 
 #[test]
@@ -103,11 +113,17 @@ fn default_native_model_is_not_remapped_to_another_claude_model() {
          [auto_review]\nmodel = 'sonnet'\n",
     );
     assert_eq!(
-        config.resolve("claude-sonnet-4-6").unwrap().id,
+        config
+            .resolve_route("claude-sonnet-4-6", None)
+            .unwrap()
+            .model,
         "claude-sonnet-4-6"
     );
-    assert_eq!(config.resolve("sonnet").unwrap().id, "claude-sonnet-4-6");
-    assert!(config.resolve("gemini-not-registered").is_err());
+    assert_eq!(
+        config.resolve_route("sonnet", None).unwrap().model,
+        "claude-sonnet-4-6"
+    );
+    assert!(config.resolve_route("gemini-not-registered", None).is_err());
 }
 
 #[test]
@@ -137,4 +153,28 @@ fn invalid_provider_configuration_and_unbounded_output_are_rejected() {
     ] {
         assert!(toml::from_str::<Config>(text).unwrap().validate().is_err());
     }
+}
+
+#[test]
+fn review_override_normalizes_codex_lanes_after_alias_recognition_with_native_default() {
+    use llm_proxy::ports::request_routing::{RouteOptions, ServiceTier};
+    let config = config(
+        "default_provider='agy'\ndefault_model='claude-sonnet-4-6'\n[auto_review]\nprovider='codex'\nmodel='gpt-5.5-fast'\n[aliases]\nquick='gpt-5.5-ultrafast'\n",
+    );
+    for (name, tier) in [
+        ("gpt-5.5-fast", ServiceTier::Priority),
+        ("quick", ServiceTier::Ultrafast),
+    ] {
+        config.recognize_model(name).unwrap();
+        let route = config.resolve_route(name, Some("codex")).unwrap();
+        assert_eq!(route.provider, "codex");
+        assert_eq!(route.model, "gpt-5.5");
+        assert!(
+            matches!(route.options, RouteOptions::Codex(options) if options.service_tier == Some(tier) && !options.responses_lite && options.search_model == "gpt-5.5")
+        );
+    }
+    assert_eq!(
+        config.resolve_route("gpt-5.5-fast", None).unwrap().model,
+        "gpt-5.5-fast"
+    );
 }

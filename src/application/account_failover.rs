@@ -1,9 +1,9 @@
 //! Account failover policy, independent of HTTP delivery.
 use super::{Application, WorkPermit};
 use crate::{
-    accounts::{Account, now},
     domain::error::{FailureKind, ProxyError},
     domain::*,
+    domain::{account::AccountSnapshot, time::now},
     ports::request_routing::RequestRoute,
 };
 use futures_util::StreamExt;
@@ -13,9 +13,9 @@ pub fn generate(
     state: Application,
     request: Arc<GenerationRequest>,
     context: RequestContext,
-    first_account: Account,
+    first_account: AccountSnapshot,
     permit: WorkPermit,
-    route: RequestRoute,
+    route: Arc<RequestRoute>,
 ) -> EventStream {
     Box::pin(async_stream::stream! {
         let mut first_account = Some(first_account);
@@ -40,7 +40,7 @@ pub fn generate(
                     store.select_for_provider_at(&provider_name, &skip, now())
                 }).await;
                 match selection {
-                    Ok(Ok(lease)) => lease.account,
+                    Ok(Ok(account)) => account,
                     Ok(Err(error)) => {
                         yield Err(error.into());
                         return;
@@ -63,13 +63,18 @@ pub fn generate(
                 request_id = %context.request_id,
                 account_id = %account.id,
                 provider = provider.name(),
-                routed_model = %request.model,
+                routed_model = %route.model,
                 request_purpose = request.purpose.as_str(),
                 event = "provider_attempt"
             );
 
             let attempt = tokio::select! {
-                result = provider.generate(request.clone(), account.clone(), context.clone()) => result,
+                result = provider.generate(
+                    request.clone(),
+                    route.clone(),
+                    account.identity(),
+                    context.clone(),
+                ) => result,
                 _ = shutdown.changed() => {
                     yield Err(shutdown_error());
                     return;
@@ -157,7 +162,7 @@ pub fn generate(
 
 async fn handle_failure(
     state: &Application,
-    account: &Account,
+    account: &AccountSnapshot,
     error: &ProxyError,
     committed: bool,
     request_id: &str,

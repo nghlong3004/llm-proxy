@@ -8,7 +8,7 @@ use axum::{
 };
 use futures_util::{StreamExt, TryStreamExt};
 use llm_proxy::{
-    accounts::{Account, Credential, Store},
+    accounts::{Credential, Store},
     adapters::outbound::agy::{
         account_usage::AgyAccountUsage, client::Agy, error, reasoning::ReasoningSigner,
         request::translate, stream::Translator,
@@ -41,11 +41,15 @@ fn credential() -> Credential {
     }
 }
 
-fn fixture() -> (tempfile::TempDir, Store, Account) {
+fn fixture() -> (
+    tempfile::TempDir,
+    Store,
+    llm_proxy::domain::account::AccountIdentity,
+) {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let account = store.login_for("agy", "synthetic", credential()).unwrap();
-    (directory, store, account)
+    (directory, store, account.identity())
 }
 
 fn request() -> GenerationRequest {
@@ -60,7 +64,7 @@ fn request() -> GenerationRequest {
         tools: Vec::new(),
         tool_choice: ToolChoice::Auto,
         parallel_tools: true,
-        effort: "medium".into(),
+        effort: None,
         output_format: None,
         stream: true,
         compact: false,
@@ -695,7 +699,7 @@ async fn native_http_stream_and_buffered_requests_use_same_sse_contract_and_prox
         let mut request = request();
         request.stream = stream;
         let events: Vec<_> = provider
-            .generate(Arc::new(request), account.clone(), context())
+            .generate(Arc::new(request), route(), account.clone(), context())
             .await
             .unwrap()
             .try_collect()
@@ -743,7 +747,7 @@ async fn definite_401_refreshes_once_and_replays_only_same_account() {
     let (_directory, store, account) = fixture();
     let provider = provider(store, &url);
     provider
-        .generate(Arc::new(request()), account, context())
+        .generate(Arc::new(request()), route(), account, context())
         .await
         .unwrap()
         .try_collect::<Vec<_>>()
@@ -772,7 +776,7 @@ async fn permission_rate_limit_and_server_error_do_not_refresh_or_retry() {
         let (url, server) = server(mock.clone()).await;
         let (_directory, store, account) = fixture();
         let result = provider(store, &url)
-            .generate(Arc::new(request()), account, context())
+            .generate(Arc::new(request()), route(), account, context())
             .await;
         let error = match result {
             Err(error) => error,
@@ -799,7 +803,7 @@ async fn incomplete_stream_is_protocol_error_without_replay() {
     let (url, server) = server(mock.clone()).await;
     let (_directory, store, account) = fixture();
     let mut events = provider(store, &url)
-        .generate(Arc::new(request()), account, context())
+        .generate(Arc::new(request()), route(), account, context())
         .await
         .unwrap();
     let mut saw_text = false;
@@ -830,7 +834,7 @@ async fn repeated_401_marks_only_selected_generation_and_stops_after_one_retry()
     let (url, server) = server(mock.clone()).await;
     let (_directory, store, account) = fixture();
     let result = provider(store.clone(), &url)
-        .generate(Arc::new(request()), account.clone(), context())
+        .generate(Arc::new(request()), route(), account.clone(), context())
         .await;
     assert!(matches!(result,Err(error) if error.kind == FailureKind::Authentication));
     assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
@@ -859,7 +863,7 @@ async fn uncertain_dispatch_transport_failure_is_not_retried() {
     });
     let (_directory, store, account) = fixture();
     let result = provider(store, &format!("http://{address}"))
-        .generate(Arc::new(request()), account, context())
+        .generate(Arc::new(request()), route(), account, context())
         .await;
     assert!(matches!(result,Err(error) if error.kind == FailureKind::Transport));
     assert!(
@@ -897,7 +901,7 @@ async fn dropping_event_stream_cancels_upstream_response_body() {
     });
     let (_directory, store, account) = fixture();
     let mut stream = provider(store, &format!("http://{address}"))
-        .generate(Arc::new(request()), account, context())
+        .generate(Arc::new(request()), route(), account, context())
         .await
         .unwrap();
     assert!(stream.next().await.unwrap().is_ok());
@@ -920,9 +924,70 @@ async fn changed_generation_is_rejected_before_dispatch() {
     let (_directory, store, old) = fixture();
     store.login_for("agy", "new", credential()).unwrap();
     let result = provider(store, &url)
-        .generate(Arc::new(request()), old, context())
+        .generate(Arc::new(request()), route(), old, context())
         .await;
     assert!(matches!(result,Err(error) if error.kind == FailureKind::AccountChanged));
     assert_eq!(mock.calls.load(Ordering::SeqCst), 0);
     server.abort();
+}
+
+fn route() -> Arc<llm_proxy::ports::request_routing::RequestRoute> {
+    Arc::new(config().resolve_route(MODEL, Some("agy")).unwrap())
+}
+
+#[tokio::test]
+#[ignore = "requires loopback sockets; synthetic only"]
+async fn every_explicit_effort_is_rejected_before_auth_or_inference_for_claude_and_gemini() {
+    use llm_proxy::{
+        domain::ReasoningEffort,
+        ports::request_routing::{RequestRoute, RouteOptions},
+    };
+    let mock = Mock::success();
+    let (url, task) = server(mock.clone()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let account = store
+        .login_for(
+            "agy",
+            "expired-synthetic",
+            Credential {
+                expires_at: 0,
+                ..credential()
+            },
+        )
+        .unwrap()
+        .identity();
+    let provider = provider(store, &url);
+    for model in [MODEL, "gemini-2.5-pro"] {
+        let route = Arc::new(RequestRoute {
+            provider: "agy".into(),
+            model: model.into(),
+            options: RouteOptions::Standard,
+        });
+        for effort in [
+            ReasoningEffort::None,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::Xhigh,
+            ReasoningEffort::Max,
+        ] {
+            let mut request = request();
+            request.effort = Some(effort);
+            assert_eq!(
+                provider
+                    .validate_request(&request, &route)
+                    .unwrap_err()
+                    .code,
+                "unsupported_reasoning_effort"
+            );
+            let result = provider
+                .generate(Arc::new(request), route.clone(), account.clone(), context())
+                .await;
+            assert!(matches!(result, Err(error) if error.code == "unsupported_reasoning_effort"));
+        }
+    }
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(mock.refreshes.load(Ordering::SeqCst), 0);
+    task.abort();
 }

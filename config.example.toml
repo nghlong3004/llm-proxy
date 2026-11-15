@@ -16,6 +16,9 @@ log_level = "info"
 # Local output policy, not provider entitlement/limits; thinking budget must be lower.
 # agy_max_output_tokens = 40960
 # agy_thinking_budget = 32000
+# AGY accepts omitted reasoning effort only: explicit output_config.effort or
+# reasoning_effort returns unsupported_reasoning_effort before dispatch. This
+# budget is the omitted-effort policy for Claude -thinking, not an effort mapping.
 # To use AGY as the default, set default_provider = "agy" and
 # default_model = "claude-sonnet-4-6" above; set [auto_review] provider = "codex"
 # and keep its Codex model below (requires a Codex account). AGY structured-output

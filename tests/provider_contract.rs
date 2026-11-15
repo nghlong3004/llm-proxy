@@ -20,7 +20,7 @@ fn compare_case(case: &Value) {
     };
     let actual = translate(
         &request,
-        &config.resolve("sonnet").unwrap(),
+        &config.resolve_route("sonnet", None).unwrap(),
         "mock-account",
         "mock-generation",
         &ReasoningSigner::new([0; 32]),

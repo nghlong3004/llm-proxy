@@ -246,3 +246,35 @@ async fn unsupported_structured_classifier_returns_error_without_an_approval() {
     assert!(body.get("content").is_none());
     providers.shutdown().await;
 }
+
+#[tokio::test]
+async fn explicit_effort_is_rejected_before_account_selection_and_count_remains_recognition_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let (app, providers) = app(store, "http://127.0.0.1:1".into());
+    for effort in ["none", "low", "medium", "high", "xhigh", "max"] {
+        let payload = json!({"model":"sonnet", "reasoning_effort":effort,
+            "messages":[{"role":"user","content":"synthetic"}]});
+        let response = app.clone().oneshot(request(payload.clone())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            body["error"]["message"],
+            "AGY does not support explicit reasoning effort"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/messages/count_tokens")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    providers.shutdown().await;
+}

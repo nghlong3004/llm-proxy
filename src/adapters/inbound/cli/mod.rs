@@ -228,7 +228,7 @@ pub async fn run() -> Result<()> {
         Command::Accounts {
             command: AccountsCommand::List { output_format },
         } => {
-            let registry = account_commands::list(store).await?;
+            let registry = bootstrap::list_accounts(store).await?;
             if matches!(output_format, OutputFormat::Json) {
                 println!("{}", usage::legacy_json(&registry)?);
             } else if registry.accounts.is_empty() {

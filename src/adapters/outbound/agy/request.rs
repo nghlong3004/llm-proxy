@@ -1,8 +1,8 @@
 //! Lossless neutral-to-Cloud-Code translation, rejecting unsupported capabilities before dispatch.
 use super::reasoning::ReasoningSigner;
 use crate::{
-    accounts::Account,
     config::Config,
+    domain::account::AccountIdentity,
     domain::{
         Content, GenerationRequest, RequestContext, Role, Tool, ToolChoice, error::ProxyError,
     },
@@ -14,7 +14,7 @@ use uuid::Uuid;
 pub fn translate(
     request: &GenerationRequest,
     model: &str,
-    account: &Account,
+    account: &AccountIdentity,
     config: &Config,
     signer: &ReasoningSigner,
     context: &RequestContext,
@@ -187,7 +187,13 @@ pub fn translate(
     }))
 }
 
-fn validate(request: &GenerationRequest, model: &str) -> Result<(), ProxyError> {
+pub fn validate(request: &GenerationRequest, model: &str) -> Result<(), ProxyError> {
+    if request.effort.is_some() {
+        return Err(
+            ProxyError::invalid("AGY does not support explicit reasoning effort")
+                .with_code("unsupported_reasoning_effort"),
+        );
+    }
     if !(model.starts_with("claude-") || model.starts_with("gemini-")) {
         return Err(unsupported(
             "AGY requires an explicitly configured Claude or Gemini model ID",

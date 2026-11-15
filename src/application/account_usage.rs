@@ -1,27 +1,39 @@
 //! Account telemetry and confirmed manual reset workflows; independent of CLI/HTTP.
 use crate::{
-    accounts::{Account, Store, now},
-    domain::account_usage::*,
-    ports::account_usage::AccountUsageProvider,
+    domain::{
+        account::{AccountCatalog, AccountSnapshot},
+        account_usage::*,
+        time::now,
+    },
+    ports::{
+        account_repository::{AccountUsageRepository, ResetGuard},
+        account_usage::AccountUsageProvider,
+    },
 };
 use futures_util::{StreamExt, stream};
-use std::{fs::File, sync::Arc};
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub struct AccountUsageService {
-    store: Store,
+    store: Arc<dyn AccountUsageRepository>,
     providers: Vec<Arc<dyn AccountUsageProvider>>,
 }
 impl AccountUsageService {
-    pub fn new(store: Store, providers: Vec<Arc<dyn AccountUsageProvider>>) -> Self {
-        Self { store, providers }
+    pub fn new<R: AccountUsageRepository + 'static>(
+        store: R,
+        providers: Vec<Arc<dyn AccountUsageProvider>>,
+    ) -> Self {
+        Self {
+            store: Arc::new(store),
+            providers,
+        }
     }
 
     fn provider(&self, name: &str) -> Option<Arc<dyn AccountUsageProvider>> {
         self.providers.iter().find(|p| p.name() == name).cloned()
     }
 
-    async fn accounts(&self) -> Result<crate::accounts::Registry, UsageError> {
+    async fn accounts(&self) -> Result<AccountCatalog, UsageError> {
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || store.list())
             .await
@@ -29,7 +41,7 @@ impl AccountUsageService {
             .map_err(|_| UsageError::Storage)
     }
 
-    async fn account(&self, provider: &str, id: &str) -> Result<Account, UsageError> {
+    async fn account(&self, provider: &str, id: &str) -> Result<AccountSnapshot, UsageError> {
         if Uuid::parse_str(id).is_err() {
             return Err(UsageError::NotFound);
         }
@@ -121,7 +133,7 @@ impl AccountUsageService {
                     match implementation {
                         Some(p) if p.capabilities().live_read => {
                             let started = now();
-                            match p.read(account.clone()).await {
+                            match p.read(account.identity()).await {
                                 Ok(read) => {
                                     let observation = UsageObservation {
                                         observed_at: Some(started),
@@ -184,7 +196,7 @@ impl AccountUsageService {
 
     async fn save_usage(
         &self,
-        account: &Account,
+        account: &AccountSnapshot,
         read: &UsageRead,
         observation: UsageObservation,
     ) -> Result<(), UsageError> {
@@ -204,14 +216,13 @@ impl AccountUsageService {
         Ok(())
     }
 
-    async fn reset_lock(&self, id: &str) -> Result<Arc<File>, UsageError> {
+    async fn reset_lock(&self, id: &str) -> Result<ResetGuard, UsageError> {
         let store = self.store.clone();
         let id = id.to_owned();
         tokio::task::spawn_blocking(move || store.try_quota_reset_lock(&id))
             .await
             .map_err(|_| UsageError::Storage)?
             .map_err(|_| UsageError::Storage)?
-            .map(Arc::new)
             .ok_or(UsageError::Busy)
     }
 
@@ -227,7 +238,7 @@ impl AccountUsageService {
     async fn save_attempt(
         &self,
         attempt: &ResetAttempt,
-        guard: Arc<File>,
+        guard: ResetGuard,
     ) -> Result<(), UsageError> {
         let store = self.store.clone();
         let attempt = attempt.clone();
@@ -243,10 +254,10 @@ impl AccountUsageService {
     async fn read_and_save(
         &self,
         implementation: &dyn AccountUsageProvider,
-        account: &Account,
+        account: &AccountSnapshot,
     ) -> Result<UsageRead, UsageError> {
         let observed_at = now();
-        let read = implementation.read(account.clone()).await?;
+        let read = implementation.read(account.identity()).await?;
         self.save_usage(
             account,
             &read,
@@ -357,7 +368,7 @@ impl AccountUsageService {
             attempt.state = ResetAttemptState::Pending;
             self.save_attempt(&attempt, guard.clone()).await?;
             match implementation
-                .reset(account.clone(), attempt.request_id.clone())
+                .reset(account.identity(), attempt.request_id.clone())
                 .await
             {
                 Ok(outcome) => {

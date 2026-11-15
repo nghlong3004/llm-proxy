@@ -323,15 +323,16 @@ async fn http_sse_transport_headers_and_fragmented_utf8_follow_the_native_contra
         codex_endpoint: format!("{url}/responses"),
         ..Default::default()
     };
-    let provider = Codex::new(store, Arc::new(config)).unwrap();
+    let provider = Codex::new(store, Arc::new(config.clone())).unwrap();
     use llm_proxy::ports::protocol_adapter::ProtocolAdapter;
     let request = llm_proxy::adapters::inbound::http::anthropic::Anthropic
         .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"hello"}]}))
         .unwrap();
     let events = provider
         .generate(
-            Arc::new(request),
-            a,
+            Arc::new(request.clone()),
+            Arc::new(config.resolve_route(&request.model, None).unwrap()),
+            a.identity(),
             RequestContext {
                 request_id: "request".into(),
                 session_id: Some("session".into()),
@@ -534,15 +535,16 @@ async fn lite_http_request_must_match_the_real_raine_translator_contract() {
             codex_endpoint: format!("{url}/responses"),
             ..Default::default()
         };
-        let provider = Codex::new(store, Arc::new(config)).unwrap();
+        let provider = Codex::new(store, Arc::new(config.clone())).unwrap();
         use llm_proxy::ports::protocol_adapter::ProtocolAdapter;
         let request = llm_proxy::adapters::inbound::http::anthropic::Anthropic
             .decode(fixture["input"].clone())
             .unwrap();
         let events = provider
             .generate(
-                Arc::new(request),
-                account,
+                Arc::new(request.clone()),
+                Arc::new(config.resolve_route(&request.model, None).unwrap()),
+                account.identity(),
                 RequestContext {
                     request_id: "contract-request".into(),
                     session_id: Some("contract-session".into()),
@@ -575,14 +577,15 @@ async fn corrupt_selected_credential_is_storage_failure_not_reselection_or_trans
         default_model: Some("gpt-5.5".into()),
         ..Default::default()
     };
-    let provider = Codex::new(store, Arc::new(config)).unwrap();
+    let provider = Codex::new(store, Arc::new(config.clone())).unwrap();
     let request = llm_proxy::adapters::inbound::http::anthropic::Anthropic
         .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"synthetic"}]}))
         .unwrap();
     let error = match provider
         .generate(
-            Arc::new(request),
-            account,
+            Arc::new(request.clone()),
+            Arc::new(config.resolve_route(&request.model, None).unwrap()),
+            account.identity(),
             RequestContext {
                 request_id: "corrupt".into(),
                 session_id: None,
@@ -628,7 +631,7 @@ async fn selected_removed_or_replaced_account_is_not_transport_or_refreshed() {
         };
         let provider = Codex::with_auth(
             store,
-            Arc::new(config),
+            Arc::new(config.clone()),
             AuthClient::with_issuer(url.clone()).unwrap(),
         )
         .unwrap();
@@ -637,8 +640,9 @@ async fn selected_removed_or_replaced_account_is_not_transport_or_refreshed() {
             .unwrap();
         let error = match provider
             .generate(
-                Arc::new(request),
-                selected,
+                Arc::new(request.clone()),
+                Arc::new(config.resolve_route(&request.model, None).unwrap()),
+                selected.identity(),
                 RequestContext {
                     request_id: "mutation".into(),
                     session_id: None,
@@ -673,15 +677,16 @@ async fn native_validation_failure_preserves_status_and_safe_parameter_without_b
         codex_endpoint: format!("{url}/responses"),
         ..Default::default()
     };
-    let provider = Codex::new(store, Arc::new(config)).unwrap();
+    let provider = Codex::new(store, Arc::new(config.clone())).unwrap();
     use llm_proxy::ports::protocol_adapter::ProtocolAdapter;
     let request = llm_proxy::adapters::inbound::http::anthropic::Anthropic
         .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"synthetic"}]}))
         .unwrap();
     let error = match provider
         .generate(
-            Arc::new(request),
-            account,
+            Arc::new(request.clone()),
+            Arc::new(config.resolve_route(&request.model, None).unwrap()),
+            account.identity(),
             RequestContext {
                 request_id: "contract-request".into(),
                 session_id: None,

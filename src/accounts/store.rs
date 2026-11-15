@@ -1,6 +1,13 @@
 //! Private, atomic account storage shared by CLI and server processes.
+use super::{Account, AccountStatus, Credential, LoginTicket, SelectionError, now};
 use crate::domain::account_usage::{
     ResetAttempt, ResetAttemptState, UsageObservation, UsageSource,
+};
+use crate::{
+    domain::account::AccountCatalog,
+    ports::account_repository::{
+        AccountCommandRepository, AccountUsageRepository, InferenceAccountRepository, ResetGuard,
+    },
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -9,55 +16,9 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
-pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Credential {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub id_token: Option<String>,
-    pub expires_at: u64,
-    pub subject: String,
-    pub account_id: String,
-    pub generation: String,
-}
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AccountStatus {
-    #[default]
-    Available,
-    QuotaExhausted {
-        reset_at: u64,
-    },
-    NeedsLogin,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Account {
-    #[serde(alias = "backend")]
-    pub provider: String,
-    pub id: String,
-    #[serde(alias = "label")]
-    pub name: String,
-    pub subject: String,
-    pub workspace: String,
-    pub generation: String,
-    pub status: AccountStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage_observation: Option<UsageObservation>,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub status_revision: u64,
-}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Registry {
     pub version: u32,
@@ -82,22 +43,6 @@ impl Default for Registry {
 pub struct Lease {
     pub account: Account,
     pub credential: Credential,
-}
-/// Reserved before OAuth starts so an older login cannot undo a newer action.
-pub struct LoginTicket {
-    provider: String,
-    sequence: u64,
-}
-#[derive(Debug, thiserror::Error)]
-pub enum SelectionError {
-    #[error(
-        "No signed-in account is available. Run: llm-proxy accounts add PROVIDER --name NAME (codex or agy)"
-    )]
-    NoAccounts,
-    #[error("All accounts have exhausted their quota; retry in {retry_after} seconds")]
-    Exhausted { retry_after: u64 },
-    #[error("Cannot read account storage")]
-    Storage(#[source] anyhow::Error),
 }
 #[derive(Clone)]
 pub struct Store {
@@ -712,9 +657,94 @@ impl Store {
         Ok(key)
     }
 }
-fn is_zero(value: &u64) -> bool {
-    *value == 0
+impl InferenceAccountRepository for Store {
+    fn list(&self) -> Result<AccountCatalog> {
+        let registry = Store::list(self)?;
+        Ok(AccountCatalog {
+            accounts: registry.accounts,
+            active: registry.active,
+        })
+    }
+
+    fn select_for_provider_at(
+        &self,
+        provider: &str,
+        excluded: &HashSet<String>,
+        time: u64,
+    ) -> Result<Account, SelectionError> {
+        Store::select_for_provider_at(self, provider, excluded, time).map(|lease| lease.account)
+    }
+
+    fn record_usage(&self, id: &str, generation: &str, usage: serde_json::Value) -> Result<()> {
+        Store::record_usage(self, id, generation, usage)
+    }
+
+    fn mark_quota_at(&self, id: &str, generation: &str, reset_at: u64, time: u64) -> Result<()> {
+        Store::mark_quota_at(self, id, generation, reset_at, time)
+    }
+
+    fn mark_needs_login(&self, id: &str, generation: &str) -> Result<()> {
+        Store::mark_needs_login(self, id, generation)
+    }
 }
+
+impl AccountCommandRepository for Store {
+    type Ticket = LoginTicket;
+
+    fn begin_login(&self, provider: &str) -> Result<LoginTicket> {
+        Store::begin_login(self, provider)
+    }
+
+    fn finish_login(
+        &self,
+        ticket: LoginTicket,
+        name: &str,
+        credential: Credential,
+    ) -> Result<Account> {
+        Store::finish_login(self, ticket, name, credential)
+    }
+
+    fn remove(&self, id: &str) -> Result<()> {
+        Store::remove(self, id)
+    }
+}
+
+impl AccountUsageRepository for Store {
+    fn list(&self) -> Result<AccountCatalog> {
+        InferenceAccountRepository::list(self)
+    }
+
+    fn record_usage_observed(
+        &self,
+        id: &str,
+        generation: &str,
+        usage: serde_json::Value,
+        observation: UsageObservation,
+    ) -> Result<bool> {
+        Store::record_usage_observed(self, id, generation, usage, observation)
+    }
+
+    fn reconcile_refreshed_quota(&self, observed: &Account) -> Result<Option<AccountStatus>> {
+        Store::reconcile_refreshed_quota(self, observed)
+    }
+
+    fn reset_attempt(&self, id: &str) -> Result<Option<ResetAttempt>> {
+        Store::reset_attempt(self, id)
+    }
+
+    fn save_reset_attempt(&self, attempt: &ResetAttempt) -> Result<()> {
+        Store::save_reset_attempt(self, attempt)
+    }
+
+    fn reconcile_quota_reset(&self, attempt: &ResetAttempt, allowed: bool) -> Result<bool> {
+        Store::reconcile_quota_reset(self, attempt, allowed)
+    }
+
+    fn try_quota_reset_lock(&self, id: &str) -> Result<Option<ResetGuard>> {
+        Store::try_quota_reset_lock(self, id).map(|guard| guard.map(ResetGuard::new))
+    }
+}
+
 fn validate_id(id: &str) -> Result<()> {
     Uuid::parse_str(id).context("Invalid account ID")?;
     Ok(())

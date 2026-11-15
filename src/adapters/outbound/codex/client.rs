@@ -1,12 +1,14 @@
 //! HTTP implementation of the provider Strategy; no agent-specific response encoding.
 use super::{quota, reasoning::ReasoningSigner, request, search, sse::Decoder, stream::Translator};
 use crate::{
-    accounts::{Account, Credential, Store, now},
+    accounts::{Credential, Store, now},
     authentication::{AuthClient, RefreshError},
     config::Config,
+    domain::account::AccountIdentity,
     domain::error::{FailureKind, ProxyError},
     domain::*,
     ports::llm_provider::Provider,
+    ports::request_routing::{RequestRoute, RouteOptions},
 };
 use axum::http::{HeaderMap, HeaderValue};
 use futures_util::{StreamExt, future::BoxFuture};
@@ -63,13 +65,18 @@ impl Codex {
     async fn start(
         self,
         request: Arc<GenerationRequest>,
-        account: Account,
+        route: Arc<RequestRoute>,
+        account: AccountIdentity,
         context: RequestContext,
     ) -> Result<EventStream, ProxyError> {
-        let model = self
-            .config
-            .resolve(&request.model)
-            .map_err(|e| ProxyError::invalid(e.to_string()).with_code("unknown_model"))?;
+        self.validate_request(&request, &route)?;
+        if account.provider != "codex" {
+            return Err(ProxyError::invalid("Codex requires a Codex account"));
+        }
+        let RouteOptions::Codex(options) = &route.options else {
+            return Err(ProxyError::invalid("Codex requires Codex route options")
+                .with_code("invalid_request_route"));
+        };
         let preparation = self.preparation.clone().try_acquire_owned().map_err(|_| {
             ProxyError::new(
                 503,
@@ -97,11 +104,16 @@ impl Codex {
         }
         let query = search::query(&request);
         let body = if let Some(query) = &query {
-            search::request_body(&request, &model.id, context.session_id.as_deref(), query)
+            search::request_body(
+                &request,
+                &options.search_model,
+                context.session_id.as_deref(),
+                query,
+            )
         } else {
             request::translate(
                 &request,
-                &model,
+                &route,
                 &account.id,
                 &credential.generation,
                 &self.signer,
@@ -130,7 +142,7 @@ impl Codex {
             provider = "codex",
             routed_model = %request.model,
             request_purpose = request.purpose.as_str(),
-            model = body.get("model").and_then(|value| value.as_str()).unwrap_or(&model.id),
+            model = body.get("model").and_then(|value| value.as_str()).unwrap_or(&route.model),
             reasoning_effort = body.pointer("/reasoning/effort").and_then(|value| value.as_str()),
             responses_lite = lite,
             event = "upstream_attempt"
@@ -188,7 +200,7 @@ impl Codex {
         let actual_model = body
             .get("model")
             .and_then(Value::as_str)
-            .unwrap_or(&model.id)
+            .unwrap_or(&route.model)
             .to_owned();
         let mut translator = Translator::new(
             request.model.clone(),
@@ -229,14 +241,26 @@ impl Provider for Codex {
     fn shutdown(&self) -> BoxFuture<'_, ()> {
         Box::pin(self.auth.shutdown())
     }
+    fn validate_request(
+        &self,
+        _: &GenerationRequest,
+        route: &RequestRoute,
+    ) -> Result<(), ProxyError> {
+        if route.provider != "codex" || !matches!(route.options, RouteOptions::Codex(_)) {
+            return Err(ProxyError::invalid("Codex route provider/options mismatch")
+                .with_code("invalid_request_route"));
+        }
+        Ok(())
+    }
     fn generate(
         &self,
         request: Arc<GenerationRequest>,
-        account: Account,
+        route: Arc<RequestRoute>,
+        account: AccountIdentity,
         context: RequestContext,
     ) -> BoxFuture<'static, Result<EventStream, ProxyError>> {
         let this = self.clone();
-        Box::pin(async move { this.start(request, account, context).await })
+        Box::pin(async move { this.start(request, route, account, context).await })
     }
 }
 fn auth_error(error: RefreshError) -> ProxyError {
@@ -341,7 +365,7 @@ mod tests {
     use super::*;
     use crate::ports::protocol_adapter::ProtocolAdapter;
 
-    fn fixture() -> (tempfile::TempDir, Codex, Account) {
+    fn fixture() -> (tempfile::TempDir, Codex, AccountIdentity) {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let account = store
@@ -367,7 +391,7 @@ mod tests {
         (
             directory,
             Codex::with_auth(store, config, auth).unwrap(),
-            account,
+            account.identity(),
         )
     }
     fn request() -> Arc<GenerationRequest> {
@@ -394,7 +418,15 @@ mod tests {
             .acquire_many_owned(32)
             .await
             .unwrap();
-        let result = provider.start(request(), account, context()).await;
+        let result = provider
+            .clone()
+            .start(
+                request(),
+                Arc::new(provider.config.resolve_route("sonnet", None).unwrap()),
+                account,
+                context(),
+            )
+            .await;
         assert!(matches!(result, Err(error) if error.code == "token_preparation_capacity"));
     }
     #[test]
@@ -414,7 +446,12 @@ mod tests {
                 release_rx.recv().unwrap();
             });
             started_rx.await.unwrap();
-            let mut pending = Box::pin(provider.clone().start(request(), account, context()));
+            let mut pending = Box::pin(provider.clone().start(
+                request(),
+                Arc::new(provider.config.resolve_route("sonnet", None).unwrap()),
+                account,
+                context(),
+            ));
             assert!(futures_util::poll!(pending.as_mut()).is_pending());
             drop(pending);
             let retained = provider.preparation.available_permits();

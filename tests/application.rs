@@ -1,26 +1,105 @@
 //! Exercise application use cases without any transport or concrete LLM adapter.
 use futures_util::{StreamExt, future::BoxFuture};
 use llm_proxy::{
-    accounts::{Account, Credential, Store},
+    accounts::Store,
     application::Application,
     config::{AutoReviewConfig, Config, ModelPolicy},
     domain::{
+        account::{
+            AccountCatalog, AccountIdentity, AccountSnapshot, AccountStatus, SelectionError,
+        },
         error::{FailureKind, ProxyError},
         *,
     },
     ports::{
+        account_repository::InferenceAccountRepository,
         llm_provider::{Provider, ProviderRegistry},
+        request_routing::RequestRoute,
         token_estimator::TokenEstimator,
     },
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
 use tokio::sync::Semaphore;
+
+struct SelectionGate {
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+struct MemoryAccounts {
+    account: AccountSnapshot,
+    gate: Option<Arc<SelectionGate>>,
+}
+impl MemoryAccounts {
+    fn new(gate: Option<Arc<SelectionGate>>) -> Self {
+        Self {
+            account: AccountSnapshot {
+                provider: "fake".into(),
+                id: "synthetic-id".into(),
+                name: "synthetic".into(),
+                subject: "synthetic-user".into(),
+                workspace: "synthetic-workspace".into(),
+                generation: "synthetic-generation".into(),
+                status: AccountStatus::Available,
+                usage: None,
+                usage_observation: None,
+                status_revision: 0,
+            },
+            gate,
+        }
+    }
+}
+impl InferenceAccountRepository for MemoryAccounts {
+    fn list(&self) -> anyhow::Result<AccountCatalog> {
+        Ok(AccountCatalog {
+            accounts: vec![self.account.clone()],
+            active: BTreeMap::from([("fake".into(), self.account.id.clone())]),
+        })
+    }
+    fn select_for_provider_at(
+        &self,
+        provider: &str,
+        excluded: &HashSet<String>,
+        _time: u64,
+    ) -> Result<AccountSnapshot, SelectionError> {
+        if let Some(gate) = &self.gate {
+            if let Some(sender) = gate.entered.lock().unwrap().take() {
+                sender.send(()).unwrap();
+            }
+            gate.release.lock().unwrap().recv().unwrap();
+        }
+        if provider != self.account.provider || excluded.contains(&self.account.id) {
+            return Err(SelectionError::NoAccounts);
+        }
+        Ok(self.account.clone())
+    }
+    fn record_usage(
+        &self,
+        _id: &str,
+        _generation: &str,
+        _usage: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("Unexpected usage mutation in repository probe")
+    }
+    fn mark_quota_at(
+        &self,
+        _id: &str,
+        _generation: &str,
+        _reset: u64,
+        _time: u64,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("Unexpected quota mutation in repository probe")
+    }
+    fn mark_needs_login(&self, _id: &str, _generation: &str) -> anyhow::Result<()> {
+        anyhow::bail!("Unexpected login mutation in repository probe")
+    }
+}
 
 struct FixedEstimator(Arc<AtomicUsize>);
 impl TokenEstimator for FixedEstimator {
@@ -43,12 +122,13 @@ impl Provider for FakeProvider {
     fn generate(
         &self,
         request: Arc<GenerationRequest>,
-        account: Account,
+        route: Arc<RequestRoute>,
+        account: AccountIdentity,
         context: RequestContext,
     ) -> BoxFuture<'static, Result<EventStream, ProxyError>> {
         assert_eq!(account.provider, "fake");
         self.0.lock().unwrap().push(Seen {
-            model: request.model.clone(),
+            model: route.model.clone(),
             session: context.session_id,
             purpose: request.purpose,
         });
@@ -77,7 +157,7 @@ fn request(purpose: RequestPurpose) -> GenerationRequest {
         tools: vec![],
         tool_choice: ToolChoice::None,
         parallel_tools: false,
-        effort: "high".into(),
+        effort: Some(ReasoningEffort::High),
         output_format: None,
         stream: true,
         compact: false,
@@ -85,23 +165,7 @@ fn request(purpose: RequestPurpose) -> GenerationRequest {
 }
 #[tokio::test]
 async fn application_routes_reviews_and_counts_through_injected_ports_without_http() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(directory.path()).unwrap();
-    store
-        .login_for(
-            "fake",
-            "synthetic",
-            Credential {
-                access_token: "synthetic-access".into(),
-                refresh_token: "synthetic-refresh".into(),
-                id_token: None,
-                expires_at: u64::MAX,
-                subject: "synthetic-user".into(),
-                account_id: "synthetic-workspace".into(),
-                generation: String::new(),
-            },
-        )
-        .unwrap();
+    let store = MemoryAccounts::new(None);
     let seen = Arc::new(Mutex::new(vec![]));
     let mut providers = ProviderRegistry::default();
     providers.register(Arc::new(FakeProvider(seen.clone())));
@@ -155,7 +219,7 @@ async fn application_routes_reviews_and_counts_through_injected_ports_without_ht
     {
         let records = seen.lock().unwrap();
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].model, "sonnet");
+        assert_eq!(records[0].model, "main-model");
         assert_eq!(records[0].session.as_deref(), Some("session"));
         assert_eq!(records[1].model, "review-model");
         assert_eq!(records[1].purpose, RequestPurpose::ActionReview);
@@ -179,6 +243,60 @@ async fn application_routes_reviews_and_counts_through_injected_ports_without_ht
         .unwrap();
     assert!(matches!(events.next().await, Some(Err(error)) if error.kind == FailureKind::Upstream));
     assert_eq!(seen.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn cancelled_selection_retains_admission_until_repository_work_finishes() {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let gate = Arc::new(SelectionGate {
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let seen = Arc::new(Mutex::new(vec![]));
+    let mut providers = ProviderRegistry::default();
+    providers.register(Arc::new(FakeProvider(seen.clone())));
+    let app = Application::new(
+        MemoryAccounts::new(Some(gate)),
+        Config {
+            default_provider: "fake".into(),
+            default_model: Some("main-model".into()),
+            ..Config::default()
+        },
+        providers,
+        Arc::new(FixedEstimator(Arc::new(AtomicUsize::new(0)))),
+    );
+    let permits = Arc::new(Semaphore::new(1));
+    let permit = Arc::new(permits.clone().acquire_owned().await.unwrap());
+    let task = tokio::spawn(async move {
+        app.generate(
+            request(RequestPurpose::Conversation),
+            RequestContext {
+                request_id: "cancelled-selection".into(),
+                session_id: None,
+            },
+            permit,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    task.abort();
+    let aborted = task.await;
+    let retained = permits.available_permits();
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while permits.available_permits() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(aborted, Err(error) if error.is_cancelled()));
+    assert_eq!(retained, 0);
+    assert!(seen.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

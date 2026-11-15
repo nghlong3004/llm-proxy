@@ -22,7 +22,15 @@ fn inner_layers_never_import_concrete_adapters_bootstrap_or_http_libraries() {
         assert!(!files.is_empty());
         for file in files {
             let source = fs::read_to_string(&file).unwrap();
-            for forbidden in ["axum::", "reqwest::", "adapters::", "bootstrap::"] {
+            for forbidden in [
+                "axum::",
+                "reqwest::",
+                "adapters::",
+                "bootstrap::",
+                "accounts::",
+                "std::fs::",
+                "fs::File",
+            ] {
                 assert!(
                     !source.contains(forbidden),
                     "{} depends outward on {forbidden}",

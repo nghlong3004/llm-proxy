@@ -6,7 +6,7 @@ use axum::{
 use futures_util::{StreamExt, future::BoxFuture};
 use http_body_util::BodyExt;
 use llm_proxy::{
-    accounts::{Account, Credential, Store},
+    accounts::{Credential, Store},
     adapters::inbound::http::anthropic::Anthropic,
     adapters::inbound::http::{AppState, router},
     application::request_routing::ConfiguredRequestRoutingPolicy,
@@ -16,6 +16,7 @@ use llm_proxy::{
     ports::protocol_adapter::ProtocolAdapter,
     ports::request_routing::{RequestRoute, RequestRoutingPolicy},
 };
+use llm_proxy::{domain::account::AccountIdentity, ports::request_routing::RouteOptions};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
@@ -26,6 +27,8 @@ struct Seen {
     model: String,
     purpose: RequestPurpose,
     session: Option<String>,
+    route: Arc<RequestRoute>,
+    client_model: String,
 }
 struct RecordingProvider {
     name: &'static str,
@@ -38,15 +41,18 @@ impl Provider for RecordingProvider {
     fn generate(
         &self,
         request: Arc<GenerationRequest>,
-        account: Account,
+        route: Arc<llm_proxy::ports::request_routing::RequestRoute>,
+        account: AccountIdentity,
         context: RequestContext,
     ) -> BoxFuture<'static, Result<EventStream, ProxyError>> {
         assert_eq!(account.provider, self.name);
         self.seen.lock().unwrap().push(Seen {
             provider: self.name,
-            model: request.model.clone(),
+            model: route.model.clone(),
             purpose: request.purpose,
             session: context.session_id,
+            route,
+            client_model: request.model.clone(),
         });
         Box::pin(async move {
             Ok(futures_util::stream::iter(vec![
@@ -69,7 +75,7 @@ impl Provider for RecordingProvider {
         })
     }
 }
-fn fixture(config: Config) -> (tempfile::TempDir, AppState, Arc<Mutex<Vec<Seen>>>) {
+fn fixture(config: Config) -> (tempfile::TempDir, AppState, Arc<Mutex<Vec<Seen>>>, Store) {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let seen = Arc::new(Mutex::new(vec![]));
@@ -97,8 +103,9 @@ fn fixture(config: Config) -> (tempfile::TempDir, AppState, Arc<Mutex<Vec<Seen>>
     }
     (
         directory,
-        llm_proxy::bootstrap::http_state(store, config, providers),
+        llm_proxy::bootstrap::http_state(store.clone(), config, providers),
         seen,
+        store,
     )
 }
 fn config() -> Config {
@@ -128,7 +135,7 @@ async fn body(response: axum::response::Response) -> Value {
 }
 #[tokio::test]
 async fn review_route_is_isolated_from_conversation_and_preserves_response_model() {
-    let (_directory, state, seen) = fixture(config());
+    let (_directory, state, seen, _store) = fixture(config());
     let app = router(state);
     for review in [false, true, false, true] {
         let response = app
@@ -148,7 +155,7 @@ async fn review_route_is_isolated_from_conversation_and_preserves_response_model
     for (index, item) in seen.iter().enumerate() {
         if index % 2 == 0 {
             assert_eq!(item.provider, "codex");
-            assert_eq!(item.model, "sonnet");
+            assert_eq!(item.model, "gpt-6.1-sol");
             assert_eq!(item.purpose, RequestPurpose::Conversation);
             assert_eq!(item.session.as_deref(), Some("synthetic-session"));
         } else {
@@ -163,7 +170,7 @@ async fn review_route_is_isolated_from_conversation_and_preserves_response_model
 async fn unknown_review_provider_does_not_fall_back_to_conversation() {
     let mut config = config();
     config.auto_review.provider = Some("not-registered".into());
-    let (_directory, state, seen) = fixture(config);
+    let (_directory, state, seen, _store) = fixture(config);
     let app = router(state);
     let response = app
         .clone()
@@ -190,7 +197,7 @@ fn omitted_review_model_defaults_to_luna_without_changing_conversation() {
         assert_eq!(config.auto_review.model.as_deref(), Some("gpt-6-luna"));
         let policy = ConfiguredRequestRoutingPolicy::new(Arc::new(config));
         let mut request = Anthropic.decode(payload(false)).unwrap();
-        assert_eq!(policy.route(&request).unwrap().model, "sonnet");
+        assert_eq!(policy.route(&request).unwrap().model, "gpt-6.1-sol");
         request.purpose = RequestPurpose::ActionReview;
         assert_eq!(policy.route(&request).unwrap().model, "gpt-6-luna");
     }
@@ -215,19 +222,18 @@ fn configured_policy_inherits_each_override_independently_and_keeps_model_tiers(
             config.validate().unwrap();
             let policy = ConfiguredRequestRoutingPolicy::new(Arc::new(config));
             let mut request = Anthropic.decode(payload(false)).unwrap();
-            assert_eq!(
-                policy.route(&request).unwrap(),
-                RequestRoute {
-                    provider: "codex".into(),
-                    model: "sonnet".into()
-                }
-            );
+            let conversation = policy.route(&request).unwrap();
+            assert_eq!(conversation.provider, "codex");
+            assert_eq!(conversation.model, "gpt-6.1-sol");
             request.purpose = RequestPurpose::ActionReview;
+            let review = policy.route(&request).unwrap();
+            assert_eq!(review.provider, provider.unwrap_or("codex"));
             assert_eq!(
-                policy.route(&request).unwrap(),
-                RequestRoute {
-                    provider: provider.unwrap_or("codex").into(),
-                    model: model.unwrap_or("sonnet").into(),
+                review.model,
+                if provider.is_some() {
+                    model.unwrap_or("gpt-6.1-sol")
+                } else {
+                    model.map(|_| "gpt-5.5").unwrap_or("gpt-6.1-sol")
                 }
             );
         }
@@ -258,12 +264,13 @@ impl RequestRoutingPolicy for InjectedPolicy {
         Ok(RequestRoute {
             provider: "review-test".into(),
             model: "gpt-5.5".into(),
+            options: RouteOptions::Standard,
         })
     }
 }
 #[tokio::test]
 async fn injected_policy_is_replaceable_and_token_count_does_not_call_it() {
-    let (_directory, mut state, seen) = fixture(config());
+    let (_directory, mut state, seen, _store) = fixture(config());
     let policy = Arc::new(InjectedPolicy(std::sync::atomic::AtomicUsize::new(0)));
     state.application.request_policy = policy.clone();
     let app = router(state);
@@ -291,15 +298,16 @@ struct QuotaThenReview {
 }
 impl Provider for QuotaThenReview {
     fn name(&self) -> &'static str {
-        "review-test"
+        self.inner.name
     }
     fn generate(
         &self,
         request: Arc<GenerationRequest>,
-        account: Account,
+        route: Arc<llm_proxy::ports::request_routing::RequestRoute>,
+        account: AccountIdentity,
         context: RequestContext,
     ) -> BoxFuture<'static, Result<EventStream, ProxyError>> {
-        let events = self.inner.generate(request, account, context);
+        let events = self.inner.generate(request, route, account, context);
         if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
             Box::pin(async {
                 Err(ProxyError::new(
@@ -317,10 +325,8 @@ impl Provider for QuotaThenReview {
 }
 #[tokio::test]
 async fn quota_retry_stays_with_review_provider_and_preserves_conversation_active_account() {
-    let (_directory, mut state, seen) = fixture(config());
-    state
-        .application
-        .store
+    let (_directory, mut state, seen, _store) = fixture(config());
+    _store
         .login_for(
             "review-test",
             "second-review",
@@ -345,7 +351,7 @@ async fn quota_retry_stays_with_review_provider_and_preserves_conversation_activ
             },
             calls: std::sync::atomic::AtomicUsize::new(0),
         }));
-    let store = state.application.store.clone();
+    let store = _store.clone();
     let before = store.list().unwrap().active.get("codex").cloned();
     let response = router(state)
         .oneshot(request("/v1/messages", payload(true)))
@@ -358,6 +364,8 @@ async fn quota_retry_stays_with_review_provider_and_preserves_conversation_activ
     );
     let records = seen.lock().unwrap();
     assert_eq!(records.len(), 2);
+    assert!(Arc::ptr_eq(&records[0].route, &records[1].route));
+    assert!(records.iter().all(|record| record.client_model == "sonnet"));
     assert!(
         records
             .iter()
@@ -368,7 +376,7 @@ async fn quota_retry_stays_with_review_provider_and_preserves_conversation_activ
 
 #[tokio::test]
 async fn original_unknown_model_is_rejected_even_with_review_override() {
-    let (_directory, state, seen) = fixture(config());
+    let (_directory, state, seen, _store) = fixture(config());
     let mut value = payload(true);
     value["model"] = json!("not-registered");
     let response = router(state)
@@ -377,4 +385,60 @@ async fn original_unknown_model_is_rejected_even_with_review_override() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn native_default_classifier_codex_fast_route_is_frozen_across_account_failover() {
+    use llm_proxy::ports::request_routing::ServiceTier;
+    let config = Config {
+        default_provider: "agy".into(),
+        default_model: Some("claude-sonnet-4-6".into()),
+        auto_review: AutoReviewConfig {
+            provider: Some("codex".into()),
+            model: Some("gpt-5.5-fast".into()),
+        },
+        ..Default::default()
+    };
+    let (_directory, mut state, seen, store) = fixture(config);
+    store
+        .login(
+            "second-codex",
+            Credential {
+                access_token: "synthetic-access".into(),
+                refresh_token: "synthetic-refresh".into(),
+                id_token: None,
+                expires_at: u64::MAX,
+                subject: "second-codex-user".into(),
+                account_id: "synthetic-workspace".into(),
+                generation: String::new(),
+            },
+        )
+        .unwrap();
+    state
+        .application
+        .providers
+        .register(Arc::new(QuotaThenReview {
+            inner: RecordingProvider {
+                name: "codex",
+                seen: seen.clone(),
+            },
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }));
+    let response = router(state)
+        .oneshot(request("/v1/messages", payload(true)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await["model"], "sonnet");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(Arc::ptr_eq(&seen[0].route, &seen[1].route));
+    for record in seen.iter() {
+        assert_eq!(record.client_model, "sonnet");
+        assert_eq!(record.route.provider, "codex");
+        assert_eq!(record.route.model, "gpt-5.5");
+        assert!(
+            matches!(&record.route.options, RouteOptions::Codex(options) if options.service_tier == Some(ServiceTier::Priority))
+        );
+    }
 }

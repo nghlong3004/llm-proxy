@@ -25,6 +25,13 @@
   or `~/.local/state/llm-proxy`. Commands sharing accounts must use the same state.
 - Keep configurable defaults in `config.rs` and `config.example.toml`. Client env
   belongs to Claude Code settings, not the proxy's process environment.
+- Resolve alias/provider/model execution policy once before account selection;
+  providers consume the frozen canonical route and never consult global routing again.
+  Omitted reasoning effort differs from explicit `medium`/`none`; AGY currently
+  rejects all explicit effort choices rather than dropping their semantics.
+- Account use cases depend on focused repository ports, not filesystem Store.
+  Keep existing atomic operations and offload synchronous persistence through
+  `spawn_blocking`; cloned admission/reset guards belong to blocking jobs until done.
 
 ## Checks
 
