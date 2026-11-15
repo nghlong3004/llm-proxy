@@ -102,7 +102,7 @@ impl From<crate::accounts::SelectionError> for ProxyError {
             crate::accounts::SelectionError::NoAccounts => Self::new(
                 503,
                 FailureKind::NoAccounts,
-                "No usable account. Run: llm-proxy accounts login --name NAME",
+                "No usable account. Run: llm-proxy accounts add codex --name NAME",
             ),
             crate::accounts::SelectionError::Storage(_) => Self::storage(),
         }
