@@ -2,45 +2,58 @@
 
 ## State
 
-- Hexagonal layout: bootstrap → adapters → application/domain/ports. See
-  [architecture](architecture.md); source and tests are the implementation reference.
-- Rust 1.100.0, edition 2024; toolchain, CI, Docker and formatter aligned.
-- Account CLI is grouped under `accounts`: `add <provider>`, `status [provider]`,
-  `reset-quota <provider> ACCOUNT_ID`, and `remove ACCOUNT_ID_OR_PREFIX`.
-  Legacy login/list and top-level shortcuts remain compatible but hidden from help.
-  Removal accepts unique ID prefixes of at least 8 characters, resolving ambiguity
-  under the registry lock; quota redemption still requires a full UUID.
-- Default status is offline. Explicit refresh reports provider-defined usage windows,
-  prepaid credits and banked resets with observation metadata; unknown/unsupported
-  values are not fabricated as zero. Manual refresh also clears captured quota
-  exhaustion when the provider authoritatively confirms ordinary usage is available,
-  including resets performed outside the proxy. Generation/status-revision checks
-  preserve newer status and NeedsLogin; active placement is unchanged. No polling.
-- Reset redemption uses a private durable request journal, cross-process exclusion,
-  explicit same-key retry, conservative uncertain outcomes and generation/status-revision
-  guarded reconciliation. No automatic redemption, purchase or mutation retry.
-- Codex account HTTP contracts are pinned to first-party source in the adapter.
-  Backend stability and account entitlement have not been verified live.
-- Implementation and synthetic verification are complete. No existing credentials,
-  real reset credits, installed configuration or services were touched.
+- Routing/effort/storage-boundary fixes are complete on `feat/agy-outbound`, following
+  commit `36475c0`. No new push/install/deployment occurred.
+- `Config::recognize_model` only recognizes client models/aliases; `resolve_route`
+  chooses the final provider before canonical normalization/options. Inference gets
+  one immutable `Arc<RequestRoute>` through every account attempt. Providers never
+  re-resolve global routing; client response model identity is preserved.
+- Default AGY + Codex review `gpt-5.5-fast` now produces Codex `gpt-5.5` with priority
+  tier. Alias/ultrafast and frozen-route failover cases are covered by synthetic tests.
+- Reasoning effort is an optional finite neutral enum. Codex retains its legacy
+  medium default centralized in config and compaction clamping. AGY rejects every
+  explicit effort as `unsupported_reasoning_effort` before account selection/auth/
+  inference; omission retains its model/config thinking policy. Counting tokens
+  remains model-recognition-only, independent of generation capabilities.
+- Neutral account DTOs/status/errors/clock live in domain. Inference and usage ports
+  receive only AccountIdentity. Core workflows depend on focused synchronous account
+  repository ports, not filesystem Store or raw File handles. The filesystem Store
+  forwards the same atomic operations, retains its inherent APIs/type aliases/serde
+  format, and still validates credentials before projecting a selected account.
+- Command repositories own an associated ticket type; Store retains its private
+  generation-order ticket. Legacy list JSON/operation bookkeeping stays at the
+  bootstrap/CLI boundary. Usage/reset workflows hold opaque cloneable RAII guards;
+  blocking selection/journal jobs retain permits/guards despite waiter cancellation.
+- Native AGY capabilities/limitations and externally supplied OAuth configuration
+  remain documented in [antigravity](antigravity.md), README and config example.
+  No existing credentials/config/services were inspected or altered. No authenticated
+  live integration has been run; no provider/model fallback was introduced.
 
 ## Verification
 
 | Check | Result |
 | --- | --- |
-| fmt / strict Clippy / release build (cached dependencies, offline) | PASS |
-| Full tests, including ignored synthetic localhost contracts | 171 PASS, 0 failed/ignored |
-| Release CLI with disposable synthetic state | PASS: grouped help/status, unique-prefix removal; filtering/unsupported/offline behavior covered by integration tests |
+| `cargo fmt --check` | PASS |
+| Strict Clippy, all targets/features, locked/offline | PASS: no warnings |
+| Full tests, including ignored synthetic localhost contracts | PASS: 245 passed, 0 failed/ignored |
+| Release build, locked/offline | PASS |
 | Diff whitespace checks | PASS |
-| Docker image/smoke and installed classifier smoke | NOT RUN: packaging unchanged; prior checkpoint passed these before this feature |
-| Live authenticated usage/reset integration | NOT RUN: requires separate authorization |
+| Google OAuth literal scan in source/tests/docs | PASS: external client configuration preserved |
+| Live authenticated integration | NOT RUN: requires separate authorization |
+| Docker image/smoke | NOT RUN: packaging unchanged |
 
-Mock contracts cover account scoping, HTTP parsing/limits, failure redaction, reset
-idempotency/uncertainty, cancellation, generation races and reconciliation. They do
-not establish live backend availability, reset entitlement or model safety.
+Regressions exercise actual inbound Codex wire routing under AGY defaults, immutable
+route identity through failover, all explicit AGY efforts rejected before dispatch,
+empty-account-pool preflight, neutral account/command/usage repository injection,
+credential-validated selection, cancelled-blocking-selection admission ownership and
+cancelled-blocking-journal reset-guard ownership. Existing account/private-file,
+refresh/login/removal races, reset uncertainty and protocol suites remain passing.
+Architecture tests forbid concrete account/filesystem imports in inner layers.
+Synthetic checks do not prove provider availability, entitlement or model safety.
 
 ## Next
 
-- Review changes; use README for the new CLI and reset recovery commands.
-- Installing/restarting services, authenticated tests, commits and deployment require
-  separate authorization. No implementation blocker remains from synthetic checks.
+- Review the refactor. Clients that explicitly send effort must omit
+  that field for AGY or choose a provider supporting it; no mapping is invented.
+- Push, authenticated login/live tests, service changes, installation and deployment
+  require separate authorization. No synthetic verification blocker remains.

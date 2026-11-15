@@ -2,7 +2,7 @@ use futures_util::future::BoxFuture;
 use llm_proxy::{
     accounts::{Account, AccountStatus, Credential, Store, now},
     application::account_usage::AccountUsageService,
-    domain::account_usage::*,
+    domain::{account::AccountIdentity, account_usage::*},
     ports::account_usage::AccountUsageProvider,
 };
 use std::{
@@ -270,7 +270,7 @@ impl AccountUsageProvider for Fake {
     fn decode_cached(&self, snapshot: &serde_json::Value) -> Result<UsageData, UsageError> {
         serde_json::from_value(snapshot.clone()).map_err(|_| UsageError::Protocol)
     }
-    fn read(&self, _: Account) -> BoxFuture<'_, Result<UsageRead, UsageError>> {
+    fn read(&self, _: AccountIdentity) -> BoxFuture<'_, Result<UsageRead, UsageError>> {
         if let Some((store, account)) = &self.remove_during_read {
             store.remove(&account.id).unwrap();
         }
@@ -296,7 +296,7 @@ impl AccountUsageProvider for Fake {
     }
     fn reset(
         &self,
-        _: Account,
+        _: AccountIdentity,
         request_id: String,
     ) -> BoxFuture<'_, Result<ResetOutcome, ResetDispatchError>> {
         self.keys.lock().unwrap().push(request_id);

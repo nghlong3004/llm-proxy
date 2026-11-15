@@ -10,27 +10,35 @@ outbound adapters implement ports; bootstrap composes implementations
 | Module | Responsibility |
 | --- | --- |
 | `bootstrap/` | Concrete wiring, configuration, logging and process lifecycle |
-| `domain/` | Neutral requests, events, errors and buffered accumulator |
+| `domain/` | Neutral generation/account DTOs, clock, errors and buffered accumulator |
 | `application/` | Generation preflight, routing, failover, token count, account/usage/reset use cases |
-| `ports/` | ProtocolAdapter, Provider/registry, RequestRoutingPolicy, TokenEstimator, optional account usage |
+| `ports/` | Protocol/provider/routing/estimator contracts and focused account repositories |
 | `adapters/inbound/cli/` | Clap parsing and output formatting |
 | `adapters/inbound/http/` | HTTP parsing, admission, SSE/buffered delivery, cancellation |
 | `adapters/inbound/http/anthropic/` | Anthropic Messages translation and SSE encoding |
 | `adapters/outbound/codex/` | Codex client, translation, quota, reasoning, search, tokenizer |
-| `accounts/` | Identity, credential persistence, selection and account state |
-| `authentication/` | OAuth, callback validation and single-flight refresh |
+| `adapters/outbound/agy/` | Native Antigravity client, translation, bounded stream, scoped thinking |
+| `adapters/outbound/{http,sse}.rs` | Shared bounded body reading and SSE JSON framing |
+| `accounts/` | Filesystem repository implementations, atomic persistence, selection and leases |
+| `authentication/` | Shared refresh lifecycle; separate Codex and Google OAuth wire flows |
 | `config.rs`, `logging/` | Model/config registry and bounded metadata logging |
 
-`domain/application/ports` never import adapters, bootstrap or HTTP libraries.
+`domain/application/ports` never import adapters, bootstrap, concrete account storage
+or HTTP/filesystem libraries. Neutral account/status/selection contracts and the clock
+live in domain. Application depends on three synchronous repository ports (inference,
+account commands, usage/reset); blocking implementations remain behind `spawn_blocking`.
+Provider ports receive a narrow account identity, not the serialized registry record.
 `bootstrap::http_state` composes injectable components; architecture tests guard
 these dependencies. Both response modes consume the same neutral EventStream.
 
 ## Request lifecycle
 
 1. HTTP acquires admission before parsing JSON, then decodes through ProtocolAdapter.
-2. Application validates the model, selects an immutable provider/model route and
-   leases the first eligible account before returning the event stream.
-3. Account failover preserves the route; Provider revalidates credentials/generation.
+2. Application recognizes the client model, resolves one immutable canonical route
+   (provider/model/typed execution options), validates generation capabilities and
+   selects the first eligible account through the inference repository.
+3. Failover preserves that same route; Provider revalidates credentials/generation
+   and consumes resolved options without consulting global routing again.
 4. HTTP encodes events or accumulates a response. Drop cancels inference; blocking
    jobs retain work permits until completion.
 
@@ -39,6 +47,15 @@ exact system prefix. Policy uses neutral RequestPurpose. Reviews retain transcri
 schema and requested effort but omit session/cache identity and encrypted replay;
 response model identity remains the client's. Token count uses an injected estimator
 and does not apply review routing. Defaults live in config, not provider code.
+Provider routing precedence is explicit review provider, then the effective canonical
+model's provider policy, then `default_provider`; aliases select a model, not an account.
+Explicit native Claude model registrations override generic Claude-family aliases.
+Provider overrides are applied before Codex service-tier suffix normalization; the
+original request model remains the client-facing response identity. Omitted reasoning
+effort differs from an explicit finite effort value: Codex applies the legacy medium
+default centralized in config, while AGY currently rejects explicit effort before account selection.
+Token count only recognizes the client model; it does not run generation capability
+validation. AGY capabilities and provenance are documented in [antigravity](antigravity.md).
 
 ## Account lifecycle
 
@@ -49,9 +66,21 @@ and does not apply review routing. Defaults live in config, not provider code.
   Existing leases retain credentials in memory; cleanup failure does not roll back login.
 - Registry locks cover atomic filesystem updates only. Account refresh locks span the
   refresh transaction, which survives client cancellation and drains on shutdown.
+  `authentication/oauth.rs` owns this lifecycle and generation-safe publication;
+  `codex.rs` and `agy.rs` own their grants, wire formats and revocation semantics.
+  AGY OAuth client ID/secret are supplied through the proxy process environment,
+  never embedded in source or fixtures.
 - Confirmed quota or definite credential rejection can switch accounts before output;
   removed/changed accounts can reselect before dispatch. Never replay uncertain work
   or events already emitted. Quota reset does not displace a healthy active account.
+
+- Quota reset locks cross the repository boundary as opaque cloneable RAII guards;
+  blocking journal/reconciliation jobs retain a guard until completion even if their
+  async waiter is cancelled. Raw filesystem handles never enter application code.
+- Legacy account-list JSON is formatted from the concrete registry at the
+  bootstrap/CLI boundary, retaining operation bookkeeping without exposing it through
+  application repository snapshots. Persisted state/schema and `accounts` re-exports
+  remain compatible.
 
 ## Account telemetry and manual resets
 

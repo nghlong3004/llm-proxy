@@ -154,3 +154,86 @@ async fn classifier_wire_uses_own_model_without_session_state_and_preserves_erro
     }
     upstream_task.abort();
 }
+
+#[tokio::test]
+#[ignore = "requires loopback sockets; uses only a synthetic localhost upstream"]
+async fn native_default_with_codex_classifier_normalizes_fast_lane_on_actual_wire() {
+    async fn upstream(
+        State(seen): State<Captures>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        seen.lock().unwrap().push((headers, body));
+        (
+            [("content-type", "text/event-stream")],
+            concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"synthetic verdict\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+            ),
+        )
+    }
+    let seen: Captures = Arc::new(Mutex::new(vec![]));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = Router::new()
+        .route("/responses", post(upstream))
+        .with_state(seen.clone());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    store
+        .login(
+            "synthetic",
+            Credential {
+                access_token: "synthetic-access".into(),
+                refresh_token: "synthetic-refresh".into(),
+                id_token: None,
+                expires_at: u64::MAX,
+                subject: "synthetic-user".into(),
+                account_id: "synthetic-workspace".into(),
+                generation: String::new(),
+            },
+        )
+        .unwrap();
+    let config = Config {
+        default_provider: "agy".into(),
+        default_model: Some("claude-sonnet-4-6".into()),
+        codex_endpoint: format!("http://{address}/responses"),
+        auto_review: AutoReviewConfig {
+            provider: Some("codex".into()),
+            model: Some("gpt-5.5-fast".into()),
+        },
+        ..Default::default()
+    };
+    config.validate().unwrap();
+    let mut providers = ProviderRegistry::default();
+    let auth =
+        llm_proxy::authentication::AuthClient::with_issuer(format!("http://{address}")).unwrap();
+    providers.register(Arc::new(
+        Codex::with_auth(store.clone(), Arc::new(config.clone()), auth).unwrap(),
+    ));
+    let app = router(llm_proxy::bootstrap::http_state(
+        store,
+        config,
+        providers.clone(),
+    ));
+    let response = app.oneshot(Request::post("/v1/messages").header("content-type", "application/json")
+        .header("authorization", "Bearer synthetic-client-only")
+        .body(Body::from(json!({"model":"sonnet", "system":PREFIX, "messages":[{"role":"user","content":"synthetic review"}],
+            "output_config":{"effort":"medium", "format":{"type":"json_schema","schema":{"type":"object","properties":{"allow":{"type":"boolean"}}}}}
+        }).to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["model"], "sonnet");
+    providers.shutdown().await;
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0["authorization"], "Bearer synthetic-access");
+    assert_eq!(seen[0].1["model"], "gpt-5.5");
+    assert_eq!(seen[0].1["service_tier"], "priority");
+    assert_eq!(seen[0].1["reasoning"]["effort"], "medium");
+    task.abort();
+}

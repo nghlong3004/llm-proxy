@@ -1,5 +1,8 @@
-//! Proxy-owned ChatGPT OAuth sessions; never changes native Codex CLI credentials.
+//! Proxy-owned OAuth sessions; never imports or changes native CLI credentials.
+mod agy;
+mod codex;
 mod oauth;
-pub use oauth::{AuthClient, CLIENT_ID, ISSUER, RefreshError};
+pub use codex::{CLIENT_ID, ISSUER};
+pub use oauth::{AuthClient, RefreshError};
 mod callback;
 mod tokens;

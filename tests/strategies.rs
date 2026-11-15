@@ -5,8 +5,9 @@ use axum::{
 };
 use futures_util::{StreamExt, future::BoxFuture};
 use http_body_util::BodyExt;
+use llm_proxy::domain::account::AccountIdentity;
 use llm_proxy::{
-    accounts::{Account, Credential, Store},
+    accounts::{Credential, Store},
     adapters::inbound::http::router,
     config::Config,
     domain::error::ProxyError,
@@ -25,7 +26,8 @@ impl Provider for EchoBackend {
     fn generate(
         &self,
         request: Arc<GenerationRequest>,
-        account: Account,
+        _route: Arc<llm_proxy::ports::request_routing::RequestRoute>,
+        account: AccountIdentity,
         _: RequestContext,
     ) -> BoxFuture<'static, Result<EventStream, ProxyError>> {
         assert_eq!(account.provider, "echo");
@@ -65,7 +67,7 @@ impl ProtocolAdapter for MinimalProtocol {
             tools: vec![],
             tool_choice: ToolChoice::None,
             parallel_tools: false,
-            effort: "none".into(),
+            effort: Some(llm_proxy::domain::ReasoningEffort::None),
             output_format: None,
             stream: value
                 .get("stream")
@@ -163,7 +165,8 @@ impl Provider for FailingBackend {
     fn generate(
         &self,
         _: Arc<GenerationRequest>,
-        _: Account,
+        _route: Arc<llm_proxy::ports::request_routing::RequestRoute>,
+        _: AccountIdentity,
         _: RequestContext,
     ) -> BoxFuture<'static, Result<EventStream, ProxyError>> {
         Box::pin(async {

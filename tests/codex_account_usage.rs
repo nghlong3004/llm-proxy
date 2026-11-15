@@ -270,7 +270,11 @@ async fn live_get_uses_selected_auth_and_preserves_count_when_details_fail() {
     ])
     .await;
     let fixture = fixture(&server);
-    let read = fixture.adapter.read(fixture.account).await.unwrap();
+    let read = fixture
+        .adapter
+        .read(fixture.account.identity())
+        .await
+        .unwrap();
     let Metric::Known(credits) = &read.data.reset_credits else {
         panic!("known resets")
     };
@@ -306,7 +310,11 @@ async fn live_get_uses_selected_auth_and_preserves_count_when_details_fail() {
 async fn known_zero_skips_details_and_does_not_infer_exhaustion() {
     let server = Mock::start(vec![Reply::json(usage(Some(0)))]).await;
     let fixture = fixture(&server);
-    let read = fixture.adapter.read(fixture.account.clone()).await.unwrap();
+    let read = fixture
+        .adapter
+        .read(fixture.account.identity())
+        .await
+        .unwrap();
     assert_eq!(read.data.ordinary_usage_allowed, Some(true));
     assert_eq!(read.warning, None);
     let lease = fixture.store.lease(&fixture.account.id).unwrap();
@@ -327,7 +335,11 @@ async fn unknown_count_is_discovered_and_expiry_is_validated_and_ordered_in_utc(
         ]})),
     ]).await;
     let fixture = fixture(&server);
-    let read = fixture.adapter.read(fixture.account).await.unwrap();
+    let read = fixture
+        .adapter
+        .read(fixture.account.identity())
+        .await
+        .unwrap();
     let Metric::Known(credits) = &read.data.reset_credits else {
         panic!("known resets")
     };
@@ -359,7 +371,11 @@ async fn malformed_details_keep_usage_count_and_report_warning() {
     ])
     .await;
     let fixture = fixture(&server);
-    let read = fixture.adapter.read(fixture.account).await.unwrap();
+    let read = fixture
+        .adapter
+        .read(fixture.account.identity())
+        .await
+        .unwrap();
     let Metric::Known(credits) = read.data.reset_credits else {
         panic!("known resets")
     };
@@ -375,7 +391,11 @@ async fn response_workspace_mismatch_is_rejected_before_credit_lookup() {
     let server = Mock::start(vec![Reply::json(value)]).await;
     let fixture = fixture(&server);
     assert_eq!(
-        fixture.adapter.read(fixture.account).await.unwrap_err(),
+        fixture
+            .adapter
+            .read(fixture.account.identity())
+            .await
+            .unwrap_err(),
         UsageError::Protocol
     );
     assert_eq!(server.state.requests.lock().await.len(), 1);
@@ -401,7 +421,7 @@ async fn malformed_and_oversized_http_bodies_return_only_static_errors() {
     for _ in 0..2 {
         let error = fixture
             .adapter
-            .read(fixture.account.clone())
+            .read(fixture.account.identity())
             .await
             .unwrap_err();
         assert_eq!(error, UsageError::Protocol);
@@ -420,7 +440,11 @@ async fn redirects_are_not_followed_with_credentials() {
     .await;
     let fixture = fixture(&server);
     assert_eq!(
-        fixture.adapter.read(fixture.account).await.unwrap_err(),
+        fixture
+            .adapter
+            .read(fixture.account.identity())
+            .await
+            .unwrap_err(),
         UsageError::Upstream
     );
     assert_eq!(server.state.requests.lock().await.len(), 1);
@@ -447,7 +471,7 @@ async fn consume_sends_exact_uuid_once_and_maps_each_known_result() {
         assert_eq!(
             fixture
                 .adapter
-                .reset(fixture.account.clone(), request_id.clone())
+                .reset(fixture.account.identity(), request_id.clone())
                 .await
                 .unwrap(),
             expected
@@ -484,7 +508,7 @@ async fn consume_401_unknown_and_malformed_results_are_dispatched_without_retry(
     ] {
         let error = fixture
             .adapter
-            .reset(fixture.account.clone(), uuid::Uuid::new_v4().to_string())
+            .reset(fixture.account.identity(), uuid::Uuid::new_v4().to_string())
             .await
             .unwrap_err();
         assert!(error.dispatched);
@@ -503,14 +527,14 @@ async fn changed_account_or_invalid_uuid_never_dispatches_consume() {
     let fixture = fixture(&server);
     let error = fixture
         .adapter
-        .reset(fixture.account.clone(), "invalid-uuid".into())
+        .reset(fixture.account.identity(), "invalid-uuid".into())
         .await
         .unwrap_err();
     assert!(!error.dispatched);
     fixture.store.remove(&fixture.account.id).unwrap();
     let error = fixture
         .adapter
-        .reset(fixture.account, uuid::Uuid::new_v4().to_string())
+        .reset(fixture.account.identity(), uuid::Uuid::new_v4().to_string())
         .await
         .unwrap_err();
     assert!(!error.dispatched);
@@ -536,7 +560,11 @@ async fn verified_equivalent_user_namespace_rejects_user_mismatch() {
     );
     fixture.account = fixture.store.login("synthetic", credential).unwrap();
     assert_eq!(
-        fixture.adapter.read(fixture.account).await.unwrap_err(),
+        fixture
+            .adapter
+            .read(fixture.account.identity())
+            .await
+            .unwrap_err(),
         UsageError::Protocol
     );
 }
@@ -553,7 +581,11 @@ async fn expiry_comparison_retains_subsecond_precision() {
     ])
     .await;
     let fixture = fixture(&server);
-    let read = fixture.adapter.read(fixture.account).await.unwrap();
+    let read = fixture
+        .adapter
+        .read(fixture.account.identity())
+        .await
+        .unwrap();
     let Metric::Known(credits) = read.data.reset_credits else {
         panic!("known resets")
     };
@@ -573,7 +605,7 @@ async fn consume_transport_failure_is_uncertain_and_not_retried() {
     assert!((&mut server.task).await.unwrap_err().is_cancelled());
     let error = fixture
         .adapter
-        .reset(fixture.account, uuid::Uuid::new_v4().to_string())
+        .reset(fixture.account.identity(), uuid::Uuid::new_v4().to_string())
         .await
         .unwrap_err();
     assert!(error.dispatched);

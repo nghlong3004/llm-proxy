@@ -4,8 +4,9 @@ use axum::{
 };
 use futures_util::{StreamExt, future::BoxFuture};
 use http_body_util::BodyExt;
+use llm_proxy::domain::account::AccountIdentity;
 use llm_proxy::{
-    accounts::{Account, Credential, Store},
+    accounts::{Credential, Store},
     adapters::inbound::http::router,
     config::Config,
     domain::error::{FailureKind, ProxyError},
@@ -33,7 +34,8 @@ impl Provider for Fake {
     fn generate(
         &self,
         _request: Arc<GenerationRequest>,
-        account: Account,
+        _route: Arc<llm_proxy::ports::request_routing::RequestRoute>,
+        account: AccountIdentity,
         _ctx: RequestContext,
     ) -> BoxFuture<'static, Result<EventStream, ProxyError>> {
         self.calls.lock().unwrap().push(account.id.clone());
@@ -330,13 +332,18 @@ async fn quota_after_start_does_not_replay_or_emit_success() {
 async fn known_all_quota_and_empty_pool_are_http_errors() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
+    let mut registry = ProviderRegistry::default();
+    registry.register(Arc::new(Fake {
+        events: HashMap::new(),
+        calls: Arc::new(Mutex::new(vec![])),
+    }));
     let app = router(llm_proxy::bootstrap::http_state(
         store.clone(),
         Config {
             default_model: Some("gpt-5.5".into()),
             ..Default::default()
         },
-        ProviderRegistry::default(),
+        registry,
     ));
     assert_eq!(
         app.clone().oneshot(req(false)).await.unwrap().status(),
@@ -367,7 +374,8 @@ impl Provider for PendingBackend {
     fn generate(
         &self,
         _: Arc<GenerationRequest>,
-        _: Account,
+        _route: Arc<llm_proxy::ports::request_routing::RequestRoute>,
+        _: AccountIdentity,
         _: RequestContext,
     ) -> BoxFuture<'static, Result<EventStream, ProxyError>> {
         let probe = Probe(self.dropped.clone());
@@ -416,7 +424,8 @@ impl Provider for ReloginBackend {
     fn generate(
         &self,
         _: Arc<GenerationRequest>,
-        _: Account,
+        _route: Arc<llm_proxy::ports::request_routing::RequestRoute>,
+        _: AccountIdentity,
         _: RequestContext,
     ) -> BoxFuture<'static, Result<EventStream, ProxyError>> {
         let changed = self.calls.fetch_add(1, Ordering::SeqCst) == 0;

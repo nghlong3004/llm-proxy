@@ -1,5 +1,5 @@
 //! Provider-neutral account telemetry and explicitly requested quota-reset results.
-use crate::accounts::AccountStatus;
+use crate::domain::account::AccountStatus;
 use serde::{Deserialize, Serialize};
 
 /// A missing or unsupported metric is not a reported zero.

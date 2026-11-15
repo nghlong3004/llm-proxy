@@ -2,7 +2,7 @@ use futures_util::future::BoxFuture;
 use llm_proxy::{
     accounts::{Account, AccountStatus, Credential, Store, now},
     application::account_usage::AccountUsageService,
-    domain::account_usage::*,
+    domain::{account::AccountIdentity, account_usage::*},
     ports::account_usage::AccountUsageProvider,
 };
 use std::sync::Arc;
@@ -114,7 +114,7 @@ impl AccountUsageProvider for HangingReset {
     fn decode_cached(&self, _: &serde_json::Value) -> Result<UsageData, UsageError> {
         Ok(UsageData::default())
     }
-    fn read(&self, _: Account) -> BoxFuture<'_, Result<UsageRead, UsageError>> {
+    fn read(&self, _: AccountIdentity) -> BoxFuture<'_, Result<UsageRead, UsageError>> {
         Box::pin(async {
             Ok(UsageRead {
                 snapshot: serde_json::json!({}),
@@ -131,7 +131,7 @@ impl AccountUsageProvider for HangingReset {
     }
     fn reset(
         &self,
-        _: Account,
+        _: AccountIdentity,
         _: String,
     ) -> BoxFuture<'_, Result<ResetOutcome, ResetDispatchError>> {
         Box::pin(async {

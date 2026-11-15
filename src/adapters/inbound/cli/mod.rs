@@ -12,7 +12,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Local coding-agent proxy with ChatGPT/Codex account failover"
+    about = "Local coding-agent proxy with Codex and Antigravity account failover"
 )]
 struct Cli {
     /// Private state/config directory; defaults to $XDG_STATE_HOME/llm-proxy.
@@ -52,7 +52,7 @@ enum Command {
 }
 #[derive(Subcommand)]
 enum AccountsCommand {
-    /// Add or renew an account for an explicit provider (currently codex only).
+    /// Add or renew a Codex or Antigravity (agy) account.
     Add(AddArgs),
     /// Show cached account usage offline, or explicitly refresh from the provider.
     Status(StatusArgs),
@@ -120,10 +120,10 @@ enum OutputFormat {
 }
 
 fn login_provider(value: &str) -> std::result::Result<String, String> {
-    if value == "codex" {
+    if matches!(value, "codex" | "agy") {
         Ok(value.to_owned())
     } else {
-        Err("Unsupported login provider; currently only codex is supported".into())
+        Err("Unsupported login provider; available: codex, agy".into())
     }
 }
 
@@ -228,7 +228,7 @@ pub async fn run() -> Result<()> {
         Command::Accounts {
             command: AccountsCommand::List { output_format },
         } => {
-            let registry = account_commands::list(store).await?;
+            let registry = bootstrap::list_accounts(store).await?;
             if matches!(output_format, OutputFormat::Json) {
                 println!("{}", usage::legacy_json(&registry)?);
             } else if registry.accounts.is_empty() {

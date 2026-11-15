@@ -1,4 +1,5 @@
 //! Inward-facing interfaces; no concrete adapters or HTTP dependencies.
+pub mod account_repository;
 pub mod account_usage;
 pub mod llm_provider;
 pub mod protocol_adapter;

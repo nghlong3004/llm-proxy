@@ -85,26 +85,26 @@ impl ProxyError {
         }
     }
 }
-impl From<crate::accounts::SelectionError> for ProxyError {
-    fn from(error: crate::accounts::SelectionError) -> Self {
+impl From<crate::domain::account::SelectionError> for ProxyError {
+    fn from(error: crate::domain::account::SelectionError) -> Self {
         match error {
-            crate::accounts::SelectionError::Exhausted { retry_after } => Self {
+            crate::domain::account::SelectionError::Exhausted { retry_after } => Self {
                 code: "subscription_quota_exhausted",
                 status: 429,
                 kind: FailureKind::Quota {
-                    reset_at: crate::accounts::now().saturating_add(retry_after),
+                    reset_at: crate::domain::time::now().saturating_add(retry_after),
                 },
                 message: "All signed-in accounts have exhausted their quota".into(),
                 retry_after: Some(retry_after),
                 upstream_status: None,
                 upstream_parameter: None,
             },
-            crate::accounts::SelectionError::NoAccounts => Self::new(
+            crate::domain::account::SelectionError::NoAccounts => Self::new(
                 503,
                 FailureKind::NoAccounts,
-                "No usable account. Run: llm-proxy accounts add codex --name NAME",
+                "No usable account. Run: llm-proxy accounts add PROVIDER --name NAME (codex or agy)",
             ),
-            crate::accounts::SelectionError::Storage(_) => Self::storage(),
+            crate::domain::account::SelectionError::Storage(_) => Self::storage(),
         }
     }
 }

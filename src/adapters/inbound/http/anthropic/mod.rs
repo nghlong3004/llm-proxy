@@ -163,14 +163,17 @@ impl ProtocolAdapter for Anthropic {
             .unwrap_or(false);
         let effort = value
             .pointer("/output_config/effort")
-            .and_then(Value::as_str)
-            .or_else(|| value.get("reasoning_effort").and_then(Value::as_str))
-            .unwrap_or("medium")
-            .to_owned();
-        if !["none", "low", "medium", "high", "xhigh", "max"].contains(&effort.as_str()) {
-            return Err(ProxyError::invalid("Unsupported reasoning effort")
-                .with_code("invalid_reasoning_effort"));
-        }
+            .or_else(|| value.get("reasoning_effort"))
+            .map(|effort| {
+                effort
+                    .as_str()
+                    .ok_or_else(|| {
+                        ProxyError::invalid("Reasoning effort must be a string")
+                            .with_code("invalid_reasoning_effort")
+                    })?
+                    .parse::<ReasoningEffort>()
+            })
+            .transpose()?;
         let output_format = value
             .pointer("/output_config/format")
             .or_else(|| value.get("output_format"))

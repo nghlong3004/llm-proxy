@@ -118,7 +118,7 @@ fn conversation_replays_signed_reasoning_but_action_review_keeps_only_summary() 
     let signer = ReasoningSigner::new([4; 32]);
     let config = Config::default();
     for model_id in ["gpt-5.5", "gpt-6.1-sol"] {
-        let model = config.resolve(model_id).unwrap();
+        let model = config.resolve_route(model_id, None).unwrap();
         let signature = signer
             .sign("a", "gen1", model_id, "rs_1", "encrypted")
             .unwrap();
@@ -143,7 +143,9 @@ fn conversation_replays_signed_reasoning_but_action_review_keeps_only_summary() 
                 .iter()
                 .all(|item| item["type"] != "reasoning")
         );
-        let offset = usize::from(model.responses_lite);
+        let offset = usize::from(
+            matches!(&model.options, llm_proxy::ports::request_routing::RouteOptions::Codex(options) if options.responses_lite),
+        );
         assert_eq!(
             review["input"][offset]["content"],
             json!([
@@ -171,7 +173,7 @@ fn anthropic_tools_and_images_become_native_codex_input() {
         default_model: Some("gpt-5.5".into()),
         ..Default::default()
     };
-    let model = config.resolve("sonnet").unwrap();
+    let model = config.resolve_route("sonnet", None).unwrap();
     let value = translate(
         &request,
         &model,
@@ -197,7 +199,7 @@ fn forced_search_without_dedicated_marker_preserves_full_history_in_both_lanes()
         };
         let native = translate(
             &request,
-            &config.resolve("sonnet").unwrap(),
+            &config.resolve_route("sonnet", None).unwrap(),
             "a",
             "g",
             &ReasoningSigner::new([0; 32]),
@@ -299,7 +301,7 @@ fn lite_lane_moves_tools_and_instructions_without_parallel_calls() {
     };
     let value = translate(
         &request,
-        &config.resolve("sonnet").unwrap(),
+        &config.resolve_route("sonnet", None).unwrap(),
         "a",
         "g",
         &ReasoningSigner::new([0; 32]),
@@ -330,7 +332,7 @@ fn claude_code_system_messages_keep_their_position_as_codex_developer_instructio
         };
         let value = translate(
             &request,
-            &config.resolve(&request.model).unwrap(),
+            &config.resolve_route(&request.model, None).unwrap(),
             "a",
             "g",
             &ReasoningSigner::new([0; 32]),
@@ -385,7 +387,7 @@ fn ordinary_claude_context_instructions_do_not_downgrade_requested_reasoning() {
         assert!(!request.compact);
         let native = translate(
             &request,
-            &config.resolve("sonnet").unwrap(),
+            &config.resolve_route("sonnet", None).unwrap(),
             "a",
             "g",
             &ReasoningSigner::new([0; 32]),
@@ -426,7 +428,7 @@ fn actual_compaction_markers_keep_the_low_reasoning_fast_path() {
         assert!(request.compact);
         let native = translate(
             &request,
-            &config.resolve("sonnet").unwrap(),
+            &config.resolve_route("sonnet", None).unwrap(),
             "a",
             "g",
             &ReasoningSigner::new([0; 32]),
@@ -434,5 +436,45 @@ fn actual_compaction_markers_keep_the_low_reasoning_fast_path() {
         )
         .unwrap();
         assert_eq!(native["reasoning"]["effort"], "low");
+    }
+}
+
+#[test]
+fn effort_omission_is_distinct_from_medium_and_primary_field_has_precedence() {
+    use llm_proxy::domain::ReasoningEffort;
+    let base = json!({"model":"sonnet","messages":[{"role":"user","content":"synthetic"}]});
+    assert_eq!(Anthropic.decode(base.clone()).unwrap().effort, None);
+    let mut explicit = base.clone();
+    explicit["reasoning_effort"] = json!("medium");
+    assert_eq!(
+        Anthropic.decode(explicit.clone()).unwrap().effort,
+        Some(ReasoningEffort::Medium)
+    );
+    explicit["output_config"] = json!({"effort":"high"});
+    assert_eq!(
+        Anthropic.decode(explicit).unwrap().effort,
+        Some(ReasoningEffort::High)
+    );
+    for invalid in [
+        json!(null),
+        json!(false),
+        json!(4),
+        json!([]),
+        json!({}),
+        json!("invalid"),
+    ] {
+        for primary in [true, false] {
+            let mut request = base.clone();
+            if primary {
+                request["reasoning_effort"] = json!("medium");
+                request["output_config"] = json!({"effort":invalid});
+            } else {
+                request["reasoning_effort"] = invalid.clone();
+            }
+            assert_eq!(
+                Anthropic.decode(request).unwrap_err().code,
+                "invalid_reasoning_effort"
+            );
+        }
     }
 }
