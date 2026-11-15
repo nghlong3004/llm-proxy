@@ -8,6 +8,7 @@ use std::{
 };
 
 pub const CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
+pub const CODEX_ACCOUNT_ENDPOINT: &str = "https://chatgpt.com/backend-api";
 pub const BUILTIN_MODELS: &[&str] = &[
     "gpt-5.2",
     "gpt-5.3-codex",
@@ -36,6 +37,7 @@ pub struct Config {
     #[serde(alias = "port")]
     pub listen_port: u16,
     pub codex_endpoint: String,
+    pub codex_account_endpoint: String,
     pub log_level: String,
     pub auto_review: AutoReviewConfig,
 }
@@ -49,6 +51,7 @@ impl Default for Config {
             listen_address: Ipv4Addr::LOCALHOST.into(),
             listen_port: 18765,
             codex_endpoint: CODEX_ENDPOINT.into(),
+            codex_account_endpoint: CODEX_ACCOUNT_ENDPOINT.into(),
             log_level: "info".into(),
             auto_review: AutoReviewConfig::default(),
         }
@@ -104,6 +107,7 @@ impl Config {
             bail!("Default model cannot be empty");
         }
         validate_endpoint(&self.codex_endpoint)?;
+        validate_endpoint(&self.codex_account_endpoint)?;
         if self.listen_port == 0 {
             bail!("Port must be between 1 and 65535");
         }
