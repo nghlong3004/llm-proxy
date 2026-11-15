@@ -9,6 +9,7 @@ use std::{
 
 pub const CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub const CODEX_ACCOUNT_ENDPOINT: &str = "https://chatgpt.com/backend-api";
+pub const AGY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 pub const BUILTIN_MODELS: &[&str] = &[
     "gpt-5.2",
     "gpt-5.3-codex",
@@ -38,6 +39,9 @@ pub struct Config {
     pub listen_port: u16,
     pub codex_endpoint: String,
     pub codex_account_endpoint: String,
+    pub agy_endpoint: String,
+    pub agy_max_output_tokens: u32,
+    pub agy_thinking_budget: u32,
     pub log_level: String,
     pub auto_review: AutoReviewConfig,
 }
@@ -52,6 +56,9 @@ impl Default for Config {
             listen_port: 18765,
             codex_endpoint: CODEX_ENDPOINT.into(),
             codex_account_endpoint: CODEX_ACCOUNT_ENDPOINT.into(),
+            agy_endpoint: AGY_ENDPOINT.into(),
+            agy_max_output_tokens: 40960,
+            agy_thinking_budget: 32000,
             log_level: "info".into(),
             auto_review: AutoReviewConfig::default(),
         }
@@ -76,12 +83,15 @@ impl Default for AutoReviewConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelPolicy {
+    /// Outbound provider for this canonical model; otherwise inherits default_provider.
+    pub provider: Option<String>,
     pub responses_lite: Option<bool>,
     pub search_model: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct ResolvedModel {
     pub id: String,
+    pub provider: String,
     pub responses_lite: bool,
     pub service_tier: Option<String>,
     pub search_model: String,
@@ -108,6 +118,24 @@ impl Config {
         }
         validate_endpoint(&self.codex_endpoint)?;
         validate_endpoint(&self.codex_account_endpoint)?;
+        validate_endpoint(&self.agy_endpoint)?;
+        if self.default_provider.trim().is_empty() {
+            bail!("default_provider cannot be empty");
+        }
+        if !(1..=65536).contains(&self.agy_max_output_tokens)
+            || self.agy_thinking_budget >= self.agy_max_output_tokens
+        {
+            bail!("agy_max_output_tokens must be 1–65536 and greater than agy_thinking_budget");
+        }
+        for policy in self.models.values() {
+            if policy
+                .provider
+                .as_ref()
+                .is_some_and(|provider| provider.trim().is_empty())
+            {
+                bail!("Model provider cannot be empty");
+            }
+        }
         if self.listen_port == 0 {
             bail!("Port must be between 1 and 65535");
         }
@@ -133,6 +161,11 @@ impl Config {
         let requested = requested.strip_suffix("[1m]").unwrap_or(requested);
         let target = if let Some(target) = self.aliases.get(requested) {
             target.as_str()
+        } else if self.models.contains_key(requested)
+            || self.default_model.as_deref() == Some(requested)
+        {
+            // An explicitly registered native model wins over the generic Claude alias.
+            requested
         } else if is_claude_alias(requested) {
             self.default_model
                 .as_deref()
@@ -149,7 +182,20 @@ impl Config {
         } else {
             bail!("Unknown model '{requested}'; use GET /v1/models or configure a model alias");
         };
-        let (id, tier) = if let Some(id) = target.strip_suffix("-ultrafast") {
+        let provider = self
+            .models
+            .get(target)
+            .or_else(|| {
+                let base = target
+                    .strip_suffix("-ultrafast")
+                    .or_else(|| target.strip_suffix("-fast"))?;
+                self.models.get(base)
+            })
+            .and_then(|policy| policy.provider.as_deref())
+            .unwrap_or(&self.default_provider);
+        let (id, tier) = if provider != "codex" {
+            (target, None)
+        } else if let Some(id) = target.strip_suffix("-ultrafast") {
             (id, Some("ultrafast"))
         } else if let Some(id) = target.strip_suffix("-fast") {
             (id, Some("priority"))
@@ -165,6 +211,7 @@ impl Config {
             .unwrap_or_else(|| id.replace("-luna", "-sol"));
         Ok(ResolvedModel {
             id: id.into(),
+            provider: provider.into(),
             responses_lite,
             service_tier: tier.map(str::to_owned),
             search_model,

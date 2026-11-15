@@ -3,7 +3,10 @@ use crate::{
     accounts::{Account, Store},
     adapters::{
         inbound::http::{AppState, anthropic::Anthropic, router},
-        outbound::codex::{CodexTokenEstimator, client::Codex},
+        outbound::{
+            agy::client::Agy,
+            codex::{CodexTokenEstimator, client::Codex},
+        },
     },
     application::{Application, account_commands},
     authentication::AuthClient,
@@ -38,10 +41,18 @@ pub async fn login_provider(
     method: LoginMethod,
 ) -> Result<Account> {
     anyhow::ensure!(
-        provider == "codex",
-        "Unsupported login provider; available: codex"
+        matches!(provider.as_str(), "codex" | "agy"),
+        "Unsupported login provider; available: codex, agy"
     );
+    anyhow::ensure!(
+        provider != "agy" || matches!(method, LoginMethod::Browser),
+        "Antigravity does not support device-code login; use accounts add agy --name NAME"
+    );
+    let agy = provider == "agy";
     account_commands::login_for(store, provider, name, async move {
+        if agy {
+            return AuthClient::agy()?.agy_browser_login().await;
+        }
         let auth = AuthClient::new()?;
         match method {
             LoginMethod::Browser => auth.browser_login().await,
@@ -79,7 +90,10 @@ async fn account_usage_service(
     };
     Ok(AccountUsageService::new(
         store,
-        vec![Arc::new(implementation)],
+        vec![
+            Arc::new(implementation),
+            Arc::new(crate::adapters::outbound::agy::account_usage::AgyAccountUsage),
+        ],
     ))
 }
 
@@ -92,7 +106,10 @@ pub async fn account_status(
     crate::domain::account_usage::UsageError,
 > {
     use crate::domain::account_usage::UsageError;
-    let service = account_usage_service(store, refresh).await?;
+    // AGY has no live usage capability; filtering it must not initialize an
+    // unrelated Codex client or depend on Codex configuration.
+    let codex_live = refresh && provider.as_deref() != Some("agy");
+    let service = account_usage_service(store, codex_live).await?;
     let result = tokio::select! {
         result = service.status(provider.as_deref(), refresh) => result,
         _ = tokio::signal::ctrl_c() => Err(UsageError::Interrupted),
@@ -159,7 +176,17 @@ pub async fn serve(
     let codex =
         tokio::task::spawn_blocking(move || Codex::new(provider_store, provider_config)).await??;
     providers.register(Arc::new(codex));
+    let provider_store = store.clone();
+    let provider_config = Arc::new(config.clone());
+    let agy =
+        tokio::task::spawn_blocking(move || Agy::new(provider_store, provider_config)).await??;
+    providers.register(Arc::new(agy));
     providers.get(&config.default_provider)?;
+    for policy in config.models.values() {
+        if let Some(provider) = &policy.provider {
+            providers.get(provider)?;
+        }
+    }
     if let Some(provider) = &config.auto_review.provider {
         providers.get(provider)?;
     }

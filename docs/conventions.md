@@ -9,6 +9,8 @@
   quota resets require full UUIDs. Legacy `accounts login/list` and top-level
   `login/status/reset-quota` remain compatible but hidden from normal help.
   Flags use `kebab-case`; TOML uses `snake_case`; finite choices use enums.
+  Login providers are `codex` (browser/device-code) and `agy` (Google browser OAuth).
+  AGY live usage/reset capabilities are explicitly unsupported, not reported as zero.
   Preserve provider wire field/URL spelling. Architecture owns the module map.
 - `accounts status` defaults to offline cached reads; `--refresh` explicitly requests live data.
   `--output-format json` serializes the public status DTO, never raw account storage.
@@ -48,3 +50,5 @@ Codex compatibility references `raine/claude-code-proxy`; account constraints re
 `kapybara-org/zerosub`. Ported schema source/revision is recorded in
 `src/adapters/outbound/codex/schema.rs` and [fixture provenance](../tests/fixtures/codex/README.md).
 Preserve the [MIT license](../LICENSE) and pinned reference generation instructions.
+Native AGY protocol provenance and deliberate differences from its upstream reference
+are pinned in [antigravity](antigravity.md); no upstream JavaScript is run or bundled.

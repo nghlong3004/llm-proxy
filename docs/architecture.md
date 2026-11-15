@@ -17,8 +17,10 @@ outbound adapters implement ports; bootstrap composes implementations
 | `adapters/inbound/http/` | HTTP parsing, admission, SSE/buffered delivery, cancellation |
 | `adapters/inbound/http/anthropic/` | Anthropic Messages translation and SSE encoding |
 | `adapters/outbound/codex/` | Codex client, translation, quota, reasoning, search, tokenizer |
+| `adapters/outbound/agy/` | Native Antigravity client, translation, bounded stream, scoped thinking |
+| `adapters/outbound/{http,sse}.rs` | Shared bounded body reading and SSE JSON framing |
 | `accounts/` | Identity, credential persistence, selection and account state |
-| `authentication/` | OAuth, callback validation and single-flight refresh |
+| `authentication/` | Shared refresh lifecycle; separate Codex and Google OAuth wire flows |
 | `config.rs`, `logging/` | Model/config registry and bounded metadata logging |
 
 `domain/application/ports` never import adapters, bootstrap or HTTP libraries.
@@ -39,6 +41,10 @@ exact system prefix. Policy uses neutral RequestPurpose. Reviews retain transcri
 schema and requested effort but omit session/cache identity and encrypted replay;
 response model identity remains the client's. Token count uses an injected estimator
 and does not apply review routing. Defaults live in config, not provider code.
+Provider routing precedence is explicit review provider, then the effective canonical
+model's provider policy, then `default_provider`; aliases select a model, not an account.
+Explicit native Claude model registrations override generic Claude-family aliases.
+AGY capabilities and pinned protocol provenance are documented in [antigravity](antigravity.md).
 
 ## Account lifecycle
 
@@ -49,6 +55,10 @@ and does not apply review routing. Defaults live in config, not provider code.
   Existing leases retain credentials in memory; cleanup failure does not roll back login.
 - Registry locks cover atomic filesystem updates only. Account refresh locks span the
   refresh transaction, which survives client cancellation and drains on shutdown.
+  `authentication/oauth.rs` owns this lifecycle and generation-safe publication;
+  `codex.rs` and `agy.rs` own their grants, wire formats and revocation semantics.
+  AGY OAuth client ID/secret are supplied through the proxy process environment,
+  never embedded in source or fixtures.
 - Confirmed quota or definite credential rejection can switch accounts before output;
   removed/changed accounts can reselect before dispatch. Never replay uncertain work
   or events already emitted. Quota reset does not displace a healthy active account.

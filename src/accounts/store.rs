@@ -90,7 +90,9 @@ pub struct LoginTicket {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum SelectionError {
-    #[error("No signed-in account is available. Run: llm-proxy accounts add codex --name NAME")]
+    #[error(
+        "No signed-in account is available. Run: llm-proxy accounts add PROVIDER --name NAME (codex or agy)"
+    )]
     NoAccounts,
     #[error("All accounts have exhausted their quota; retry in {retry_after} seconds")]
     Exhausted { retry_after: u64 },

@@ -9,6 +9,17 @@ listen_port = 18765
 log_level = "info"
 # Usage/reset API base; independent of the inference Responses endpoint.
 # codex_account_endpoint = "https://chatgpt.com/backend-api"
+# Native Antigravity outbound (Google OAuth; no Node sidecar).
+# OAuth client credentials belong in the proxy process environment, never TOML:
+# LLM_PROXY_AGY_CLIENT_ID and LLM_PROXY_AGY_CLIENT_SECRET (also required for refresh).
+# agy_endpoint = "https://daily-cloudcode-pa.googleapis.com"
+# Local output policy, not provider entitlement/limits; thinking budget must be lower.
+# agy_max_output_tokens = 40960
+# agy_thinking_budget = 32000
+# To use AGY as the default, set default_provider = "agy" and
+# default_model = "claude-sonnet-4-6" above; set [auto_review] provider = "codex"
+# and keep its Codex model below (requires a Codex account). AGY structured-output
+# classifiers are unsupported and fail closed.
 
 # Client classifier: provider inherits default_provider; model defaults to Luna.
 # CLAUDE_CODE_AUTO_MODE_SERVER=0 belongs on Claude Code, not the proxy process.
@@ -17,8 +28,10 @@ log_level = "info"
 model = "gpt-6-luna"
 # model = "sonnet" # Explicitly follow the main default model instead.
 
-# Unmapped Claude aliases all use default_model. Override individual aliases here.
+# Unmapped Claude aliases use default_model. Explicitly registered native Claude
+# model IDs win over this fallback. Override individual aliases here.
 [aliases]
+# sonnet = "claude-sonnet-4-6" # Also register the AGY model policy shown below.
 # haiku = "gpt-6-luna"
 # sonnet = "gpt-6.1-sol"
 # opus = "gpt-6-astra"
@@ -28,6 +41,16 @@ model = "gpt-6-luna"
 # on parallel tools still apply. Hosted automatic search uses the full search lane.
 [models."gpt-6.1-sol"]
 responses_lite = false
+
+# Register a model served by your Antigravity account and route it independently.
+# Canonical IDs/availability differ from the first-party Anthropic API; these are
+# upstream reference examples, not a guarantee that your account can use them.
+# [models."claude-sonnet-4-6"]
+# provider = "agy"
+# [models."claude-opus-4-6-thinking"]
+# provider = "agy"
+# [models."gemini-3.8-flash-tiered"]
+# provider = "agy"
 
 # Register an additional account-supported model without changing source:
 # [models."another-model-id"]

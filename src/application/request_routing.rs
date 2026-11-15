@@ -19,18 +19,22 @@ impl ConfiguredRequestRoutingPolicy {
 impl RequestRoutingPolicy for ConfiguredRequestRoutingPolicy {
     fn route(&self, request: &GenerationRequest) -> Result<RequestRoute, ProxyError> {
         let review = request.purpose == RequestPurpose::ActionReview;
-        let provider = if review {
-            self.config.auto_review.provider.as_deref()
-        } else {
-            None
-        }
-        .unwrap_or(&self.config.default_provider);
         let model = if review {
             self.config.auto_review.model.as_deref()
         } else {
             None
         }
         .unwrap_or(&request.model);
+        let resolved = self
+            .config
+            .resolve(model)
+            .map_err(|error| ProxyError::invalid(error.to_string()).with_code("unknown_model"))?;
+        let provider = if review {
+            self.config.auto_review.provider.as_deref()
+        } else {
+            None
+        }
+        .unwrap_or(&resolved.provider);
         if provider.trim().is_empty() || model.trim().is_empty() {
             return Err(
                 ProxyError::invalid("Request route provider and model must not be empty")

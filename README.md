@@ -1,13 +1,14 @@
 # llm-proxy
 
-Proxy localhost cho phép **Claude Code dùng Codex qua tài khoản ChatGPT subscription**.
-Hỗ trợ nhiều account và chuyển account khi xác nhận hết quota. Claude Code vẫn
-thực thi tools, sửa file và chạy terminal.
+Proxy localhost cho phép **Claude Code dùng Codex hoặc Antigravity (`agy`) làm outbound**.
+Codex dùng tài khoản ChatGPT subscription; AGY dùng Google OAuth và Cloud Code Assist API.
+Hỗ trợ nhiều account theo từng provider; chỉ chuyển account khi lỗi cho phép failover an toàn.
+Claude Code vẫn thực thi tools, sửa file và chạy terminal; proxy không chạy agent loop.
 
 ```mermaid
 flowchart LR
     Agent["Claude Code"] <-->|Anthropic Messages| Proxy["llm-proxy"]
-    Proxy <-->|Codex Responses| Provider["Codex"]
+    Proxy <-->|Native provider API| Provider["Codex / Antigravity"]
     Provider --> Model["LLM"]
 ```
 
@@ -162,7 +163,7 @@ khớp nhiều account thì phải nhập dài hơn. `reset-quota` vẫn cần U
 Tương thích lệnh cũ: `accounts login --name personal --login-method device-code`
 vẫn đăng nhập Codex; `accounts list` và JSON của nó giữ định dạng cũ. Các lệnh
 cấp đầu `login`, `status`, `reset-quota` vẫn hoạt động nhưng ẩn khỏi help chính.
-`accounts add` bắt buộc có provider (hiện chỉ `codex`).
+`accounts add` bắt buộc có provider (`codex` hoặc `agy`).
 
 Docker: thêm `docker compose exec proxy` trước các lệnh trên.
 
@@ -170,6 +171,84 @@ Config native nằm tại `~/.local/state/llm-proxy/config.toml` (hoặc
 `$XDG_STATE_HOME/llm-proxy/config.toml`); Docker tại `/var/lib/llm-proxy/state/config.toml`.
 Dùng [config.example.toml](config.example.toml) khi cần đổi model hoặc alias.
 Thay config cần restart proxy; thêm/xóa account không cần restart.
+
+## Antigravity (`agy`)
+
+Adapter Rust native, **không cần chạy thêm proxy Node**. OAuth client ID/secret không
+được nhúng trong source. Cung cấp cấu hình client được phép sử dụng qua môi trường
+của tiến trình proxy (không phải `~/.claude/settings.json`), rồi đăng nhập trên host/WSL:
+
+```sh
+export LLM_PROXY_AGY_CLIENT_ID='<oauth-client-id>'
+export LLM_PROXY_AGY_CLIENT_SECRET='<oauth-client-secret>'
+llm-proxy accounts add agy --name google-personal
+llm-proxy accounts status agy
+```
+
+Các giá trị trên chỉ là placeholder; không commit giá trị thật vào repo. Tiến trình
+`serve` cũng cần hai biến này để refresh token; nếu chạy systemd/container, truyền
+chúng qua cơ chế secret/environment private của môi trường triển khai. Client OAuth
+phải được dịch vụ chấp nhận; tạo client Google bất kỳ không bảo đảm có quyền AGY.
+Thiếu cấu hình sẽ báo lỗi trước login/token exchange, không vô hiệu hóa account và
+không ảnh hưởng startup chỉ dùng Codex hay đọc status offline.
+
+Mở URL được in ra, đăng nhập Google và cho phép callback về
+`http://localhost:51121/oauth-callback`. Không có device-code login hay import credential
+của ứng dụng Antigravity. Proxy lưu token riêng trong state private; identity gồm user ID
+và project được Google trả về. Login có thể onboard project khi tài khoản chưa có;
+không tự chọn project ID giả. Nếu callback không tới WSL, cần cấu hình localhost forwarding;
+không mở callback ra wildcard/public. Login bên trong Docker chưa được hỗ trợ bởi cấu hình
+publication hiện tại; không publish callback lên mạng để khắc phục.
+
+Ví dụ gộp vào `config.toml` để dùng AGY cho hội thoại, vẫn dùng Codex cho classifier:
+
+```toml
+default_provider = "agy"
+default_model = "claude-sonnet-4-6"
+
+[auto_review]
+provider = "codex"
+model = "gpt-6-luna"
+```
+
+Classifier này cần account Codex riêng. AGY chưa hỗ trợ structured-output requests,
+nên không dùng AGY làm classifier Auto mode; lỗi classifier luôn trả lỗi, không tự duyệt.
+Giữ `CLAUDE_CODE_AUTO_MODE_SERVER=0` trên client nếu dùng client classifier.
+
+Hoặc giữ default Codex, chỉ chuyển một alias sang AGY:
+
+```toml
+default_provider = "codex"
+default_model = "gpt-6.1-sol"
+
+[aliases]
+sonnet = "claude-sonnet-4-6"
+
+[models."claude-sonnet-4-6"]
+provider = "agy"
+```
+
+Model ID phải là ID canonical do AGY phục vụ. `claude-sonnet-4-6` và
+`claude-opus-4-6-thinking` là ví dụ từ source tham khảo, **không phải bảo đảm entitlement**;
+proxy không ngầm đổi model mới thành model cũ. Đăng ký model khác qua `[models."ID"]`.
+Route theo thứ tự: `auto_review.provider` tường minh → policy của model hiệu lực →
+`default_provider`. Không failover xuyên provider hoặc đổi model khi gặp lỗi.
+
+Bản đầu hỗ trợ text, ảnh base64, function tools/tool results trên Claude, SSE và buffered
+response từ cùng stream, cùng thought-signature replay có kiểm tra account/generation/model.
+Gemini hiện chỉ hỗ trợ text/ảnh; function tools của Gemini, hosted search, compaction,
+structured output và forced tool choice chưa hỗ trợ sẽ trả lỗi trước dispatch.
+Schema tools có constraint phong phú được giữ nguyên qua `parametersJsonSchema` thay vì
+bị bỏ constraint; khả năng chấp nhận trường này trên API nội bộ chưa được kiểm live.
+Token count vẫn là ước lượng local, không phải tokenizer/quota chính thức của Google.
+
+`accounts status agy` chỉ đọc metadata offline. Usage live và banked quota reset của AGY
+hiện báo `unsupported`, không bịa số 0. Generic 429/`RESOURCE_EXHAUSTED`, lỗi capacity,
+permission/model, mạng hoặc 5xx không đủ để đánh dấu account hết quota hay replay request.
+
+Đây là API nội bộ, có thể đổi hoặc giới hạn tài khoản; cần tự kiểm tra điều khoản và quyền
+sử dụng dịch vụ. Tích hợp mới chỉ được kiểm bằng mock/local, **chưa xác minh live**.
+Xem [provenance và giới hạn](docs/antigravity.md).
 
 ## 5. Cập nhật phiên bản mới
 

@@ -2,45 +2,60 @@
 
 ## State
 
-- Hexagonal layout: bootstrap → adapters → application/domain/ports. See
-  [architecture](architecture.md); source and tests are the implementation reference.
-- Rust 1.100.0, edition 2024; toolchain, CI, Docker and formatter aligned.
-- Account CLI is grouped under `accounts`: `add <provider>`, `status [provider]`,
-  `reset-quota <provider> ACCOUNT_ID`, and `remove ACCOUNT_ID_OR_PREFIX`.
-  Legacy login/list and top-level shortcuts remain compatible but hidden from help.
-  Removal accepts unique ID prefixes of at least 8 characters, resolving ambiguity
-  under the registry lock; quota redemption still requires a full UUID.
-- Default status is offline. Explicit refresh reports provider-defined usage windows,
-  prepaid credits and banked resets with observation metadata; unknown/unsupported
-  values are not fabricated as zero. Manual refresh also clears captured quota
-  exhaustion when the provider authoritatively confirms ordinary usage is available,
-  including resets performed outside the proxy. Generation/status-revision checks
-  preserve newer status and NeedsLogin; active placement is unchanged. No polling.
-- Reset redemption uses a private durable request journal, cross-process exclusion,
-  explicit same-key retry, conservative uncertain outcomes and generation/status-revision
-  guarded reconciliation. No automatic redemption, purchase or mutation retry.
-- Codex account HTTP contracts are pinned to first-party source in the adapter.
-  Backend stability and account entitlement have not been verified live.
-- Implementation and synthetic verification are complete. No existing credentials,
-  real reset credits, installed configuration or services were touched.
+- Native Antigravity outbound (`agy`) is implemented on `feat/agy-outbound` alongside
+  Codex. Existing Codex defaults, legacy commands and account persistence remain
+  compatible. No installation or deployment has been performed.
+- `config.toml` supports an AGY endpoint/output policy and per-model `provider`.
+  Routing precedence: explicit action-review provider → effective model policy →
+  default provider. Explicit native Claude model registrations win over generic
+  Claude aliases. Account failover never changes the selected provider/model.
+- `accounts add agy --name NAME` uses proxy-owned Google browser OAuth with PKCE,
+  a state-checked loopback callback, stable user/project identity and actual managed
+  project discovery. Refresh reuses bounded single-flight, cross-process locking,
+  generation-safe atomic persistence, cancellation independence and shutdown drain.
+  OAuth client configuration is external: `LLM_PROXY_AGY_CLIENT_ID` and
+  `LLM_PROXY_AGY_CLIENT_SECRET` must be provided to login and refresh processes;
+  source/tests contain no embedded Google OAuth client credentials. Missing config
+  fails before exchange, without disabling an account or breaking Codex startup.
+  `authentication/oauth.rs` owns only the shared refresh lifecycle; `codex.rs` and
+  `agy.rs` contain provider-specific endpoints, grants and revocation semantics.
+- Native request/SSE translation supports Claude text/images/function tools/results,
+  buffered and streaming responses, bounded output and scoped thought-signature
+  replay. Rich tool schemas retain constraints through `parametersJsonSchema`;
+  internal-service acceptance of that field is not live-verified.
+- Gemini currently supports text/images only. Hosted search, compaction, forced tool
+  choice and structured output are unsupported; configure a Codex review route for
+  structured Auto-mode classifiers. AGY live usage and banked resets are explicitly
+  unsupported; offline status stays credential/config/network independent.
+- Shared outbound SSE/body limits were extracted without changing existing Codex
+  import paths. No prompt rewriting, guessed project IDs, signature bypass sentinels
+  or generic-429 quota failover. No existing credentials/config/services were touched.
+- Protocol reference and MIT attribution are pinned in [antigravity](antigravity.md)
+  to upstream `7c672fdc6fa62fcd50e8f75df5644dad6a63c2dc`. See README and
+  `config.example.toml` for native login and mixed-provider routing.
 
 ## Verification
 
 | Check | Result |
 | --- | --- |
-| fmt / strict Clippy / release build (cached dependencies, offline) | PASS |
-| Full tests, including ignored synthetic localhost contracts | 171 PASS, 0 failed/ignored |
-| Release CLI with disposable synthetic state | PASS: grouped help/status, unique-prefix removal; filtering/unsupported/offline behavior covered by integration tests |
+| `cargo fmt --check` | PASS |
+| Strict Clippy, all targets/features, locked/offline | PASS |
+| Full tests, including ignored synthetic localhost contracts | PASS: 233 passed, 0 failed/ignored |
+| Release build, locked/offline | PASS |
+| Release CLI with disposable private state | PASS: help, offline AGY status, missing OAuth config fails before login; no network |
+| Google OAuth client literal scan | PASS for working tree and staged changes; tests use synthetic client values |
 | Diff whitespace checks | PASS |
-| Docker image/smoke and installed classifier smoke | NOT RUN: packaging unchanged; prior checkpoint passed these before this feature |
-| Live authenticated usage/reset integration | NOT RUN: requires separate authorization |
+| Live authenticated integration | NOT RUN: requires separate authorization |
+| Docker image/smoke | NOT RUN: packaging unchanged; AGY browser callback is not published by shipped Docker configuration |
 
-Mock contracts cover account scoping, HTTP parsing/limits, failure redaction, reset
-idempotency/uncertainty, cancellation, generation races and reconciliation. They do
-not establish live backend availability, reset entitlement or model safety.
+Synthetic contracts cover OAuth/discovery, refresh rotation/cancellation/generation
+races, provider routing, credential isolation, tools/schema fidelity, thought-signature
+scope/chunk completion, usage/finish metadata, malformed streams, resource bounds,
+401-only retry, ambiguous 429 non-failover and disconnect cancellation. They do not
+prove backend availability, model entitlement, service-terms permission or model safety.
 
 ## Next
 
-- Review changes; use README for the new CLI and reset recovery commands.
-- Installing/restarting services, authenticated tests, commits and deployment require
-  separate authorization. No implementation blocker remains from synthetic checks.
+- Review the feature diff and choose account-supported canonical models in config.
+- Native AGY login/live verification, service changes, push and deployment require
+  separate authorization. No blocker remains from synthetic verification.

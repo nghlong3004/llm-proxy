@@ -84,7 +84,7 @@ impl AccountUsageService {
                         Ok(data) => (data, None),
                         Err(error) => (UsageData::default(), Some(error)),
                     },
-                    (Some(_), None) => (UsageData::default(), None),
+                    (Some(p), None) => (p.empty_usage(), None),
                     (None, _) => (UsageData::unsupported(), None),
                 };
                 let mut view = AccountUsageView {
