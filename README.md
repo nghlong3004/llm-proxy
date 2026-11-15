@@ -174,23 +174,29 @@ Thay config cần restart proxy; thêm/xóa account không cần restart.
 
 ## Antigravity (`agy`)
 
-Adapter Rust native, **không cần chạy thêm proxy Node**. OAuth client ID/secret không
-được nhúng trong source. Cung cấp cấu hình client được phép sử dụng qua môi trường
-của tiến trình proxy (không phải `~/.claude/settings.json`), rồi đăng nhập trên host/WSL:
+Adapter Rust native, **không cần chạy thêm proxy Node và không cần đặt OAuth client env**:
 
 ```sh
-export LLM_PROXY_AGY_CLIENT_ID='<oauth-client-id>'
-export LLM_PROXY_AGY_CLIENT_SECRET='<oauth-client-secret>'
 llm-proxy accounts add agy --name google-personal
 llm-proxy accounts status agy
 ```
 
-Các giá trị trên chỉ là placeholder; không commit giá trị thật vào repo. Tiến trình
-`serve` cũng cần hai biến này để refresh token; nếu chạy systemd/container, truyền
-chúng qua cơ chế secret/environment private của môi trường triển khai. Client OAuth
-phải được dịch vụ chấp nhận; tạo client Google bất kỳ không bảo đảm có quyền AGY.
-Thiếu cấu hình sẽ báo lỗi trước login/token exchange, không vô hiệu hóa account và
-không ảnh hưởng startup chỉ dùng Codex hay đọc status offline.
+Lần login/refresh đầu tiên cần mạng tới `raw.githubusercontent.com` để lấy cấu hình
+OAuth client công khai từ **commit đã ghim** của repo tham khảo. Proxy kiểm tra SHA-256
+trước khi chỉ trích hai trường client; không chạy JavaScript hay lấy endpoints/prompt
+của file đó. Không nhúng hoặc mã hóa giấu cặp client trong source/tests.
+
+Cache nằm tại `<state-dir>/agy-oauth-client/7c672fdc6fa62fcd50e8f75df5644dad6a63c2dc/reference.txt`
+(thư mục `0700`, file `0600`), được dùng lại cho refresh ở cùng state directory.
+Cache hỏng/sai hash sẽ báo lỗi trước OAuth, không tự bỏ qua integrity hay đổi pin.
+Status offline và startup chỉ dùng Codex không tải file này.
+
+Nếu chủ động override, cung cấp **cả** `LLM_PROXY_AGY_CLIENT_ID` và
+`LLM_PROXY_AGY_CLIENT_SECRET` cho tiến trình login/serve; chỉ có một biến hoặc giá trị
+rỗng sẽ báo lỗi, không trộn với bản tham khảo. Không đặt chúng trong TOML/repo hay
+`~/.claude/settings.json`. Client vẫn phải được Google/AGY chấp nhận; cấu hình công
+khai hoặc client tự tạo không bảo đảm entitlement. Xem nguồn/hash trong
+[provenance](docs/antigravity.md).
 
 Mở URL được in ra, đăng nhập Google và cho phép callback về
 `http://localhost:51121/oauth-callback`. Không có device-code login hay import credential

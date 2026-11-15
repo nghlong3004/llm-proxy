@@ -24,14 +24,30 @@ Source paths at the pinned revision:
   ambiguous capacity/rate errors and account-dependent canonical model IDs.
 
 Tests use fabricated credentials, project/user/model identities and source-derived
-JSON contracts only. They do not capture live prompts or credentials. OAuth client
-configuration is supplied externally through `LLM_PROXY_AGY_CLIENT_ID` and
-`LLM_PROXY_AGY_CLIENT_SECRET`; source and tests contain no provider client credentials.
-Tests inject unmistakably synthetic client values. Client configuration is required
-only when starting login or exchanging tokens, not for Codex startup or offline status.
-Configure the same environment for login and the proxy process that refreshes tokens.
-A client must be authorized/accepted by the service; arbitrary Google OAuth app
-registration does not establish Antigravity entitlement.
+JSON contracts only. They do not capture live prompts or credentials. Provider client
+values are not embedded in source/tests or disguised through encoding. By default,
+login/refresh lazily downloads the public reference's `src/constants.js` from the
+pinned raw GitHub URL and verifies SHA-256
+`abebb46f041f9daa26bba4d855626946bad33edd369da1dbfe1bad4d0bb9b7d8` before extraction.
+Only the two string fields `OAUTH_CONFIG.clientId/clientSecret` are read. JavaScript is
+never executed, and source-provided endpoints/prompts/configuration are not adopted.
+
+The verified bytes are atomically cached at
+`<state-dir>/agy-oauth-client/7c672fdc6fa62fcd50e8f75df5644dad6a63c2dc/reference.txt`.
+Directories are private (0700), files are 0600, and cross-process locks protect cache
+reads/publication without spanning network awaits. Cache loads recheck the digest;
+corruption errors rather than silently redownloading or accepting a different source.
+The cache has no account tokens and is distinct from account credential storage.
+
+A complete `LLM_PROXY_AGY_CLIENT_ID` / `LLM_PROXY_AGY_CLIENT_SECRET` pair overrides
+reference acquisition; partial, empty or malformed overrides are errors, not mixed
+with reference values. When overriding, configure the same pair for login and refresh.
+Explicit synthetic test endpoint injection never enables reference downloads implicitly.
+Neither provider construction, offline status nor Codex-only startup acquires the
+reference. First uncached AGY login/refresh needs access to raw.githubusercontent.com;
+there is no branch-head update, redirect following or integrity bypass. The client
+must still be authorized/accepted by the service; this public reference and arbitrary
+Google OAuth app registration do not establish Antigravity entitlement.
 
 ## Integration policy
 

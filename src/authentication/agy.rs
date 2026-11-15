@@ -1,6 +1,7 @@
 //! Native AGY Google OAuth, pinned to upstream 7c672fdc6fa62fcd50e8f75df5644dad6a63c2dc.
-//! OAuth client configuration is supplied externally, never embedded in source.
+//! Client configuration is acquired lazily from a verified public reference or explicit overrides.
 use super::{
+    agy_client::ClientSource,
     callback::{Callback, oauth_callback},
     oauth::{AuthClient, Flavor, RefreshError, read_json},
     tokens::Tokens,
@@ -12,7 +13,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, oneshot};
 
 const AUTHORIZE: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -30,28 +31,22 @@ pub(super) struct AgyEndpoints {
     pub(super) token: String,
     userinfo: String,
     project: String,
-    client_id: String,
-    client_secret: String,
-}
-
-impl AgyEndpoints {
-    pub(super) fn client(&self) -> Result<(&str, &str)> {
-        if self.client_id.trim().is_empty() || self.client_secret.trim().is_empty() {
-            bail!("Set LLM_PROXY_AGY_CLIENT_ID and LLM_PROXY_AGY_CLIENT_SECRET for AGY OAuth");
-        }
-        Ok((&self.client_id, &self.client_secret))
-    }
+    client: ClientSource,
 }
 
 impl AuthClient {
     /// Proxy-owned native AGY OAuth. Does not inspect installed native credentials.
     pub fn agy() -> Result<Self> {
-        Self::with_agy_endpoints(
+        Self::agy_with_state_dir(&crate::config::state_dir()?)
+    }
+
+    /// Keep login and refresh on the selected proxy state, with lazy verified acquisition.
+    pub fn agy_with_state_dir(root: &Path) -> Result<Self> {
+        Self::with_agy_source(
             "https://oauth2.googleapis.com/token".into(),
             "https://www.googleapis.com/oauth2/v1/userinfo".into(),
             "https://cloudcode-pa.googleapis.com".into(),
-            std::env::var("LLM_PROXY_AGY_CLIENT_ID").unwrap_or_default(),
-            std::env::var("LLM_PROXY_AGY_CLIENT_SECRET").unwrap_or_default(),
+            ClientSource::from_environment(root.to_owned()),
         )
     }
 
@@ -64,6 +59,20 @@ impl AuthClient {
         client_id: String,
         client_secret: String,
     ) -> Result<Self> {
+        Self::with_agy_source(
+            token,
+            userinfo,
+            project_base,
+            ClientSource::explicit(client_id, client_secret),
+        )
+    }
+
+    pub(super) fn with_agy_source(
+        token: String,
+        userinfo: String,
+        project_base: String,
+        client: ClientSource,
+    ) -> Result<Self> {
         for endpoint in [&token, &userinfo, &project_base] {
             crate::config::validate_endpoint(endpoint)
                 .map_err(|_| anyhow::anyhow!("Invalid AGY OAuth endpoint"))?;
@@ -74,8 +83,7 @@ impl AuthClient {
                 token,
                 userinfo,
                 project: project_base.trim_end_matches('/').to_owned(),
-                client_id,
-                client_secret,
+                client,
             }),
         )
     }
@@ -85,7 +93,11 @@ impl AuthClient {
         current: &Credential,
     ) -> Result<Credential, RefreshError> {
         let endpoints = self.agy_endpoints()?;
-        let (client_id, client_secret) = endpoints.client()?;
+        let client = endpoints.client.resolve(&self.client).await?;
+        // Reference acquisition may have waited on disk/network. Do not start a
+        // rotating token exchange after shutdown began during that preparation.
+        self.ensure_refresh_open()?;
+        let (client_id, client_secret) = client.pair();
         let response = self
             .client
             .post(&endpoints.token)
@@ -133,7 +145,8 @@ impl AuthClient {
 
     /// Explicit browser consent is the only flow permitted to onboard a managed project.
     pub async fn agy_browser_login(&self) -> Result<Credential> {
-        let (client_id, _) = self.agy_endpoints()?.client()?;
+        let client = self.agy_endpoints()?.client.resolve(&self.client).await?;
+        let (client_id, _) = client.pair();
         let verifier = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
         let state = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
         let url = authorization_url(&verifier, &state, client_id)?;
@@ -188,7 +201,8 @@ impl AuthClient {
 
     async fn agy_exchange_code(&self, code: &str, verifier: &str) -> Result<Credential> {
         let endpoints = self.agy_endpoints()?;
-        let (client_id, client_secret) = endpoints.client()?;
+        let client = endpoints.client.resolve(&self.client).await?;
+        let (client_id, client_secret) = client.pair();
         let response = self
             .client
             .post(&endpoints.token)

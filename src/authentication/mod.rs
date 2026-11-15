@@ -1,5 +1,6 @@
 //! Proxy-owned OAuth sessions; never imports or changes native CLI credentials.
 mod agy;
+mod agy_client;
 mod codex;
 mod oauth;
 pub use codex::{CLIENT_ID, ISSUER};

@@ -10,8 +10,10 @@ log_level = "info"
 # Usage/reset API base; independent of the inference Responses endpoint.
 # codex_account_endpoint = "https://chatgpt.com/backend-api"
 # Native Antigravity outbound (Google OAuth; no Node sidecar).
-# OAuth client credentials belong in the proxy process environment, never TOML:
-# LLM_PROXY_AGY_CLIENT_ID and LLM_PROXY_AGY_CLIENT_SECRET (also required for refresh).
+# OAuth client configuration is auto-acquired from an integrity-pinned public
+# reference and cached privately in state; no OAuth client env is required.
+# Optional override: set BOTH LLM_PROXY_AGY_CLIENT_ID and LLM_PROXY_AGY_CLIENT_SECRET
+# in the login/serve process environment, never TOML/source.
 # agy_endpoint = "https://daily-cloudcode-pa.googleapis.com"
 # Local output policy, not provider entitlement/limits; thinking budget must be lower.
 # agy_max_output_tokens = 40960
