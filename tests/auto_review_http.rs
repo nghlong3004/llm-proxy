@@ -10,9 +10,10 @@ use axum::{
 use http_body_util::BodyExt;
 use llm_proxy::{
     accounts::{Credential, Store},
+    adapters::inbound::http::router,
+    adapters::outbound::codex::client::Codex,
     config::{AutoReviewConfig, Config},
-    providers::{ProviderRegistry, codex::client::Codex},
-    server::{AppState, router},
+    ports::llm_provider::ProviderRegistry,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -83,7 +84,11 @@ async fn classifier_wire_uses_own_model_without_session_state_and_preserves_erro
     providers.register(Arc::new(
         Codex::new(store.clone(), Arc::new(config.clone())).unwrap(),
     ));
-    let app = router(AppState::new(store, config, providers.clone()));
+    let app = router(llm_proxy::bootstrap::http_state(
+        store,
+        config,
+        providers.clone(),
+    ));
     for (index, system) in [
         "ordinary instructions".to_owned(),
         PREFIX.into(),

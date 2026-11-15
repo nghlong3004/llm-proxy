@@ -1,5 +1,6 @@
 //! Anthropic Messages adapter. Client-specific field names stop at this boundary.
-use super::ProtocolAdapter;
+pub mod sse;
+use crate::ports::protocol_adapter::ProtocolAdapter;
 use crate::{
     domain::error::{FailureKind, ProxyError},
     domain::*,

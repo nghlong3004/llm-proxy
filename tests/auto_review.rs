@@ -7,15 +7,14 @@ use futures_util::{StreamExt, future::BoxFuture};
 use http_body_util::BodyExt;
 use llm_proxy::{
     accounts::{Account, Credential, Store},
+    adapters::inbound::http::anthropic::Anthropic,
+    adapters::inbound::http::{AppState, router},
+    application::request_routing::ConfiguredRequestRoutingPolicy,
     config::{AutoReviewConfig, Config},
     domain::{error::ProxyError, *},
-    protocols::{ProtocolAdapter, anthropic::Anthropic},
-    providers::{Provider, ProviderRegistry},
-    server::{
-        AppState,
-        request_policy::{ConfiguredRequestRoutingPolicy, RequestRoute, RequestRoutingPolicy},
-        router,
-    },
+    ports::llm_provider::{Provider, ProviderRegistry},
+    ports::protocol_adapter::ProtocolAdapter,
+    ports::request_routing::{RequestRoute, RequestRoutingPolicy},
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -96,7 +95,11 @@ fn fixture(config: Config) -> (tempfile::TempDir, AppState, Arc<Mutex<Vec<Seen>>
             seen: seen.clone(),
         }));
     }
-    (directory, AppState::new(store, config, providers), seen)
+    (
+        directory,
+        llm_proxy::bootstrap::http_state(store, config, providers),
+        seen,
+    )
 }
 fn config() -> Config {
     Config {
@@ -262,7 +265,7 @@ impl RequestRoutingPolicy for InjectedPolicy {
 async fn injected_policy_is_replaceable_and_token_count_does_not_call_it() {
     let (_directory, mut state, seen) = fixture(config());
     let policy = Arc::new(InjectedPolicy(std::sync::atomic::AtomicUsize::new(0)));
-    state.request_policy = policy.clone();
+    state.application.request_policy = policy.clone();
     let app = router(state);
     let response = app
         .clone()
@@ -316,6 +319,7 @@ impl Provider for QuotaThenReview {
 async fn quota_retry_stays_with_review_provider_and_preserves_conversation_active_account() {
     let (_directory, mut state, seen) = fixture(config());
     state
+        .application
         .store
         .login_for(
             "review-test",
@@ -331,14 +335,17 @@ async fn quota_retry_stays_with_review_provider_and_preserves_conversation_activ
             },
         )
         .unwrap();
-    state.providers.register(Arc::new(QuotaThenReview {
-        inner: RecordingProvider {
-            name: "review-test",
-            seen: seen.clone(),
-        },
-        calls: std::sync::atomic::AtomicUsize::new(0),
-    }));
-    let store = state.store.clone();
+    state
+        .application
+        .providers
+        .register(Arc::new(QuotaThenReview {
+            inner: RecordingProvider {
+                name: "review-test",
+                seen: seen.clone(),
+            },
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }));
+    let store = state.application.store.clone();
     let before = store.list().unwrap().active.get("codex").cloned();
     let response = router(state)
         .oneshot(request("/v1/messages", payload(true)))

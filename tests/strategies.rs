@@ -7,12 +7,12 @@ use futures_util::{StreamExt, future::BoxFuture};
 use http_body_util::BodyExt;
 use llm_proxy::{
     accounts::{Account, Credential, Store},
+    adapters::inbound::http::router,
     config::Config,
     domain::error::ProxyError,
     domain::*,
-    protocols::ProtocolAdapter,
-    providers::{Provider, ProviderRegistry},
-    server::{AppState, router},
+    ports::llm_provider::{Provider, ProviderRegistry},
+    ports::protocol_adapter::ProtocolAdapter,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -114,7 +114,7 @@ async fn protocol_adapter_and_provider_strategy_can_be_replaced_independently() 
     };
     let mut providers = ProviderRegistry::default();
     providers.register(Arc::new(EchoBackend));
-    let mut state = AppState::new(store, config, providers);
+    let mut state = llm_proxy::bootstrap::http_state(store, config, providers);
     state.protocol = Arc::new(MinimalProtocol);
     let response = router(state)
         .oneshot(
@@ -137,7 +137,8 @@ async fn protocol_adapter_and_provider_strategy_can_be_replaced_independently() 
 async fn replacement_ingress_owns_decode_error_shape() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let mut state = AppState::new(store, Config::default(), ProviderRegistry::default());
+    let mut state =
+        llm_proxy::bootstrap::http_state(store, Config::default(), ProviderRegistry::default());
     state.protocol = Arc::new(MinimalProtocol);
     let response = router(state)
         .oneshot(
@@ -191,7 +192,7 @@ async fn replacement_ingress_owns_stream_error_shape() {
         .unwrap();
     let mut registry = ProviderRegistry::default();
     registry.register(Arc::new(FailingBackend));
-    let mut state = AppState::new(
+    let mut state = llm_proxy::bootstrap::http_state(
         store,
         Config {
             default_model: Some("echo-model".into()),

@@ -30,5 +30,5 @@ vẫn override. Client `CLAUDE_CODE_AUTO_MODE_SERVER=0` không phải server con
 `raine/claude-code-proxy` tham khảo OAuth/native headers/Responses lanes/translation;
 `kapybara-org/zerosub` tham khảo identity/quota/account-bound reasoning, không port
 source ZeroSub. Không mang agent runtime vào proxy. Revision source port nằm trong
-`src/providers/codex/schema.rs` và [fixture provenance](../tests/fixtures/codex/README.md),
+`src/adapters/outbound/codex/schema.rs` và [fixture provenance](../tests/fixtures/codex/README.md),
 MIT attribution giữ ở [LICENSE](../LICENSE), cũng ship trong runtime image.

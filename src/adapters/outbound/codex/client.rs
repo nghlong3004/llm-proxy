@@ -6,7 +6,7 @@ use crate::{
     config::Config,
     domain::error::{FailureKind, ProxyError},
     domain::*,
-    providers::Provider,
+    ports::llm_provider::Provider,
 };
 use axum::http::{HeaderMap, HeaderValue};
 use futures_util::{StreamExt, future::BoxFuture};
@@ -356,7 +356,7 @@ pub async fn read_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::ProtocolAdapter;
+    use crate::ports::protocol_adapter::ProtocolAdapter;
 
     fn fixture() -> (tempfile::TempDir, Codex, Account) {
         let directory = tempfile::tempdir().unwrap();
@@ -389,7 +389,7 @@ mod tests {
     }
     fn request() -> Arc<GenerationRequest> {
         Arc::new(
-            crate::protocols::anthropic::Anthropic
+            crate::adapters::inbound::http::anthropic::Anthropic
                 .decode(serde_json::json!({
                     "model": "sonnet", "messages": [{"role":"user", "content":"synthetic"}],
                 }))

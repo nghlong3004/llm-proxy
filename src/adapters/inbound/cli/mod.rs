@@ -1,14 +1,12 @@
 //! CLI convention: resource/action commands; kebab-case flags mirror config keys.
 use crate::{
-    accounts::{AccountStatus, Store, now},
-    authentication::AuthClient,
-    config::{self, Config},
-    providers::{ProviderRegistry, codex::client::Codex},
-    server::{AppState, router},
+    accounts::{AccountStatus, now},
+    application::account_commands,
+    bootstrap,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -75,33 +73,22 @@ enum OutputFormat {
 
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let directory = cli.state_dir.map(Ok).unwrap_or_else(config::state_dir)?;
-    let store = tokio::task::spawn_blocking(move || Store::open(directory)).await??;
+    let store = bootstrap::open_store(cli.state_dir).await?;
     match cli.command {
         Command::Accounts {
             command: AccountsCommand::Login { name, login_method },
         } => {
-            anyhow::ensure!(
-                !name.trim().is_empty() && name.len() <= 200,
-                "Account name must contain 1–200 bytes"
-            );
-            let login_store = store.clone();
-            let ticket =
-                tokio::task::spawn_blocking(move || login_store.begin_login("codex")).await??;
-            let auth = AuthClient::new()?;
-            let credential = match login_method {
-                LoginMethod::Browser => auth.browser_login().await?,
-                LoginMethod::DeviceCode => auth.device_login().await?,
+            let method = match login_method {
+                LoginMethod::Browser => bootstrap::LoginMethod::Browser,
+                LoginMethod::DeviceCode => bootstrap::LoginMethod::DeviceCode,
             };
-            let account =
-                tokio::task::spawn_blocking(move || store.finish_login(ticket, &name, credential))
-                    .await??;
+            let account = bootstrap::login(store, name, method).await?;
             println!("Signed in: {} ({})", account.name, account.id);
         }
         Command::Accounts {
             command: AccountsCommand::List { output_format },
         } => {
-            let registry = tokio::task::spawn_blocking(move || store.list()).await??;
+            let registry = account_commands::list(store).await?;
             if matches!(output_format, OutputFormat::Json) {
                 println!("{}", serde_json::to_string_pretty(&registry)?);
             } else if registry.accounts.is_empty() {
@@ -132,7 +119,7 @@ pub async fn run() -> Result<()> {
         Command::Accounts {
             command: AccountsCommand::Remove { id },
         } => {
-            tokio::task::spawn_blocking(move || store.remove(&id)).await??;
+            account_commands::remove(store, id).await?;
             println!(
                 "Account removed. Existing requests may finish; new requests use another account."
             );
@@ -142,55 +129,7 @@ pub async fn run() -> Result<()> {
             listen_address,
             listen_port,
         } => {
-            let config_store = store.clone();
-            let mut config =
-                tokio::task::spawn_blocking(move || Config::load(config_store.root())).await??;
-            if let Some(model) = default_model {
-                config.default_model = Some(model);
-            }
-            if let Some(address) = listen_address {
-                config.listen_address = address;
-            }
-            if let Some(port) = listen_port {
-                config.listen_port = port;
-            }
-            config.validate()?;
-            let log_directory = store.root().to_owned();
-            let log_level = config.log_level.clone();
-            let _log_guard = tokio::task::spawn_blocking(move || {
-                crate::logging::initialize(&log_directory, &log_level)
-            })
-            .await??;
-            let mut providers = ProviderRegistry::default();
-            let provider_store = store.clone();
-            let provider_config = Arc::new(config.clone());
-            let codex =
-                tokio::task::spawn_blocking(move || Codex::new(provider_store, provider_config))
-                    .await??;
-            providers.register(Arc::new(codex));
-            providers.get(&config.default_provider)?;
-            if let Some(provider) = &config.auto_review.provider {
-                providers.get(provider)?;
-            }
-            let address = std::net::SocketAddr::new(config.listen_address, config.listen_port);
-            let state = AppState::new(store, config, providers);
-            let shutdown = state.clone();
-            let providers = state.providers.clone();
-            let listener = tokio::net::TcpListener::bind(address)
-                .await
-                .with_context(|| format!("Cannot listen on {address}"))?;
-            println!("llm-proxy listening at http://{address}");
-            tracing::info!(listen_address = %address.ip(), listen_port = address.port(), provider = %state.config.default_provider,
-                default_model = ?state.config.default_model, event = "proxy_started");
-            axum::serve(listener, router(state))
-                .with_graceful_shutdown(async move {
-                    if tokio::signal::ctrl_c().await.is_ok() {
-                        shutdown.shutdown();
-                    }
-                })
-                .await?;
-            providers.shutdown().await;
-            tracing::info!(event = "proxy_stopped");
+            bootstrap::serve(store, default_model, listen_address, listen_port).await?;
         }
     }
     Ok(())

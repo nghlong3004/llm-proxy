@@ -1,5 +1,4 @@
 //! Adapter pattern: translate a client protocol to/from the shared generation contract.
-pub mod anthropic;
 use crate::{
     domain::error::ProxyError,
     domain::{GenerationEvent, GenerationOutput, GenerationRequest, RequestPurpose},
@@ -15,4 +14,3 @@ pub trait ProtocolAdapter: Send + Sync {
     fn encode_error(&self, error: &ProxyError) -> Value;
     fn encode_stream_error(&self, error: &ProxyError) -> Vec<(String, Value)>;
 }
-pub mod sse;

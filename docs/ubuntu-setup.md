@@ -11,7 +11,7 @@ sudo apt-get update
 sudo apt-get install -y git curl ca-certificates build-essential pkg-config cmake python3
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
-rustup update stable
+rustup toolchain install 1.100.0 --profile minimal --component rustfmt --component clippy
 git clone https://github.com/nghlong3004/llm-proxy.git
 cd llm-proxy
 cargo install --path . --locked --root "$HOME/.local"
@@ -19,7 +19,7 @@ export PATH="$HOME/.local/bin:$PATH"
 llm-proxy --version
 ```
 
-Repo private cần quyền GitHub (hoặc clone SSH). Rust stable >=1.99, không dùng bản apt
+Repo private cần quyền GitHub (hoặc clone SSH). Rust stable >=1.100, không dùng bản apt
 cũ; [installer chính thức](https://rust-lang.org/tools/install/). Nếu thiếu PATH, thêm
 dòng `export PATH="$HOME/.local/bin:$PATH"` một lần vào `~/.bashrc` hoặc `~/.zshrc`.
 

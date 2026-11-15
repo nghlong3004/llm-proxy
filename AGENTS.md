@@ -19,16 +19,18 @@ when interfaces, commands or structure change. Use `rust-best-practices` and
 
 ## Product and boundaries
 
-- Latest stable Rust/dependencies, edition 2024; commit `Cargo.lock`.
+- Rust 1.100.0, edition 2024; compatible stable dependencies, commit `Cargo.lock`.
+- Use stable rustfmt (`rustfmt.toml`, width 100); manually expand dense macro bodies
+  that rustfmt does not format. Do not pack branches/statements into one line.
 - CLI-managed localhost proxy using multiple Codex subscription accounts. Preserve
   active account until confirmed exhaustion; runtime account changes affect later requests.
 - Target Claude Code tools/images/reasoning/structured output/SSE/WebSearch/portable
   compaction; reference `raine/claude-code-proxy`. **Never execute agent tools:**
   Claude Code owns files, shell and the agent loop.
-- Keep modules isolated as mapped in `docs/architecture.md`: CLI only wiring;
-  domain protocol-neutral; adapters own wire schemas/errors; providers own upstream
-  translation; accounts own identity/storage/selection; authentication owns OAuth;
-  server owns orchestration/cancellation; logging owns safe metadata. No layer leakage.
+- Follow layout B in `docs/architecture.md`: bootstrap composes concrete adapters;
+  domain/application/ports must not import adapters/bootstrap/HTTP libraries. Inbound
+  CLI parses/formats, HTTP owns parsing/admission/SSE/cancel, application owns use
+  cases/routing/failover. Accounts/authentication/logging keep their isolated roles.
 
 ## Mandatory invariants
 

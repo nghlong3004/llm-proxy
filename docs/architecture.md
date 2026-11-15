@@ -3,30 +3,33 @@
 ## Luồng và ranh giới
 
 ```text
-Claude Code → server HTTP → ProtocolAdapter → domain::GenerationRequest
-  → RequestRoutingPolicy → accounts::Store → ProviderRegistry → Codex HTTP/SSE
-Claude Code ← ProtocolAdapter ← domain::GenerationEvent ← Codex translator
+Claude Code → inbound HTTP/Anthropic → domain request → application → ports → Codex adapter
+Claude Code ← inbound HTTP/Anthropic ← domain events  ← application ← ports ← Codex adapter
 ```
 
-Claude Code sở hữu filesystem/shell/tools/agent loop; proxy không chạy tool.
-Streaming và buffered dùng cùng EventStream, accumulator chỉ gom event trung lập.
+Layout B (Hexagonal), được user chọn ngày 2026-11-15. Một crate/binary; không agent
+runtime hoặc JEV giả. `bootstrap/` nối implementations; inner layers không import
+adapters/bootstrap/Axum/reqwest, được regression test kiểm tra. Streaming và buffered
+dùng cùng EventStream. Rust 1.100.0, edition 2024; format theo `rustfmt.toml`.
 
 | Module | Trách nhiệm |
 | --- | --- |
-| `main.rs`, `cli/` | Entrypoint, Clap và wiring; không business logic |
-| `config.rs` | TOML, model/alias registry, endpoints |
-| `domain/` | Request/content/event/error/accumulator; không Axum hay wire schema |
-| `protocols/` | Adapter decode/encode request, response, SSE và lỗi Anthropic |
-| `providers/` | `Provider` Strategy + registry |
-| `providers/codex/` | Client, translation, schema/search/reasoning, bounded SSE/quota |
-| `accounts/store.rs` | Repository: identity, private storage, tickets, sticky selection |
-| `authentication/` | Browser/device OAuth, callback/PKCE, refresh single flight |
-| `server/` | HTTP admission/delivery/cancel; `routing.rs` failover; `request_policy.rs` route Strategy |
-| `logging/` | Metadata JSONL, bounded worker, rotation |
-| `tests/` | Behavior/replaceable Strategy tests, synthetic accounts/upstreams |
+| `main.rs`, `bootstrap/` | Entrypoint, concrete composition, logging/server lifecycle |
+| `domain/` | Request/content/event/error/accumulator trung lập |
+| `application/` | Generation preflight, request routing, account failover, count/health/account use cases |
+| `ports/` | ProtocolAdapter, Provider/registry, RequestRoutingPolicy, TokenEstimator interfaces |
+| `adapters/inbound/cli/` | Clap, dispatch và output formatting |
+| `adapters/inbound/http/` | Parsing/admission/response/SSE/cancellation ownership |
+| `adapters/inbound/http/anthropic/` | Anthropic adapter và SSE encoder |
+| `adapters/outbound/codex/` | Native client/translation/quota/search/reasoning, tokenizer implementation |
+| `accounts/`, `authentication/` | Identity/private storage/selection và independent OAuth/refresh |
+| `config.rs`, `logging/` | Configuration/model registry và safe bounded JSONL |
+| `tests/` | Behavioral tests và dependency-direction guards |
 
-Trait objects + constructors đủ cho Adapter/Strategy injection; chưa cần plugin/DI
-framework. History `system` text giữ nguyên vị trí, Codex map thành `developer`.
+Không giữ aliases module cũ. History `system` text vẫn giữ vị trí, Codex map thành
+`developer`. HTTP lấy admission trước JSON; application nhận work permit và giữ
+clone trong blocking jobs. Token count gọi injected TokenEstimator, không gọi Codex
+trực tiếp từ HTTP/application. `bootstrap::http_state` hỗ trợ composition trong tests.
 
 ## Action-review routing
 

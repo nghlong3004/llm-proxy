@@ -50,7 +50,7 @@ hay nối container không tin cậy vào network. Process truy cập được A
 
 ## Native Rust
 
-Cần Rust stable (>=1.99), linker/C compiler, `pkg-config`; toolchain/components được
+Cần Rust stable (>=1.100), linker/C compiler, `pkg-config`; toolchain/components được
 chọn bởi `rust-toolchain.toml`, dependencies khóa trong `Cargo.lock`.
 
 ```sh
