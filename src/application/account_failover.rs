@@ -1,19 +1,20 @@
-//! Account policy and provider Strategy dispatch, shared by all protocol adapters.
-use super::{AdmissionPermit, AppState, request_policy::RequestRoute};
+//! Account failover policy, independent of HTTP delivery.
+use super::{Application, WorkPermit};
 use crate::{
     accounts::{Account, now},
     domain::error::{FailureKind, ProxyError},
     domain::*,
+    ports::request_routing::RequestRoute,
 };
 use futures_util::StreamExt;
 use std::{collections::HashSet, sync::Arc};
 
 pub fn generate(
-    state: AppState,
+    state: Application,
     request: Arc<GenerationRequest>,
     context: RequestContext,
     first_account: Account,
-    permit: AdmissionPermit,
+    permit: WorkPermit,
     route: RequestRoute,
 ) -> EventStream {
     Box::pin(async_stream::stream! {
@@ -34,19 +35,29 @@ pub fn generate(
                 let skip = excluded.clone();
                 let provider_name = route.provider.clone();
                 let preparation_permit = permit.clone();
-                match tokio::task::spawn_blocking(move || {
+                let selection = tokio::task::spawn_blocking(move || {
                     let _permit = preparation_permit;
                     store.select_for_provider_at(&provider_name, &skip, now())
-                }).await {
+                }).await;
+                match selection {
                     Ok(Ok(lease)) => lease.account,
-                    Ok(Err(error)) => { yield Err(error.into()); return; }
-                    Err(_) => { yield Err(ProxyError::storage()); return; }
+                    Ok(Err(error)) => {
+                        yield Err(error.into());
+                        return;
+                    }
+                    Err(_) => {
+                        yield Err(ProxyError::storage());
+                        return;
+                    }
                 }
             };
             excluded.insert(account.id.clone());
             let provider = match state.providers.get(&route.provider) {
                 Ok(provider) => provider,
-                Err(error) => { yield Err(error); return; }
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
             };
             tracing::debug!(
                 request_id = %context.request_id,
@@ -59,7 +70,10 @@ pub fn generate(
 
             let attempt = tokio::select! {
                 result = provider.generate(request.clone(), account.clone(), context.clone()) => result,
-                _ = shutdown.changed() => { yield Err(shutdown_error()); return; }
+                _ = shutdown.changed() => {
+                    yield Err(shutdown_error());
+                    return;
+                }
             };
             let mut stream = match attempt {
                 Ok(stream) => stream,
@@ -67,7 +81,10 @@ pub fn generate(
                     if error.kind == FailureKind::AccountChanged {
                         excluded.remove(&account.id);
                     }
-                    match handle_failure(&state, &account, &error, committed, &context.request_id, permit.clone()).await {
+                    let recovery = handle_failure(
+                        &state, &account, &error, committed, &context.request_id, permit.clone(),
+                    ).await;
+                    match recovery {
                         Ok(true) => continue,
                         Ok(false) => yield Err(error),
                         Err(storage) => yield Err(storage),
@@ -79,7 +96,10 @@ pub fn generate(
             loop {
                 let event = tokio::select! {
                     event = stream.next() => event,
-                    _ = shutdown.changed() => { yield Err(shutdown_error()); return; }
+                    _ = shutdown.changed() => {
+                        yield Err(shutdown_error());
+                        return;
+                    }
                 };
                 match event {
                     Some(Ok(GenerationEvent::QuotaSnapshot(usage))) => {
@@ -102,10 +122,15 @@ pub fn generate(
                             committed = true;
                         }
                         yield Ok(event);
-                        if finished { return; }
+                        if finished {
+                            return;
+                        }
                     }
                     Some(Err(error)) => {
-                        match handle_failure(&state, &account, &error, committed, &context.request_id, permit.clone()).await {
+                        let recovery = handle_failure(
+                            &state, &account, &error, committed, &context.request_id, permit.clone(),
+                        ).await;
+                        match recovery {
                             Ok(true) => retry = true,
                             Ok(false) => yield Err(error),
                             Err(storage) => yield Err(storage),
@@ -118,21 +143,25 @@ pub fn generate(
                     }
                 }
             }
-            if !retry { return; }
+            if !retry {
+                return;
+            }
         }
         yield Err(ProxyError::new(
-            429, FailureKind::RateLimit, "Account failover attempt limit reached",
+            429,
+            FailureKind::RateLimit,
+            "Account failover attempt limit reached",
         ));
     })
 }
 
 async fn handle_failure(
-    state: &AppState,
+    state: &Application,
     account: &Account,
     error: &ProxyError,
     committed: bool,
     request_id: &str,
-    permit: AdmissionPermit,
+    permit: WorkPermit,
 ) -> Result<bool, ProxyError> {
     let store = state.store.clone();
     let id = account.id.clone();
@@ -159,9 +188,15 @@ async fn handle_failure(
         error.kind == FailureKind::AccountChanged
     };
     tracing::warn!(
-        request_id, account_id = %account.id, kind = ?error.kind, error_code = error.code, committed,
-        upstream_status = error.upstream_status, upstream_parameter = error.upstream_parameter,
-        retry = retry && !committed, event = "upstream_failure"
+        request_id,
+        account_id = %account.id,
+        kind = ?error.kind,
+        error_code = error.code,
+        committed,
+        upstream_status = error.upstream_status,
+        upstream_parameter = error.upstream_parameter,
+        retry = retry && !committed,
+        event = "upstream_failure"
     );
     Ok(retry && !committed)
 }

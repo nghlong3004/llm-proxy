@@ -1,4 +1,4 @@
-use llm_proxy::providers::codex::{quota::classify, sse::Decoder};
+use llm_proxy::adapters::outbound::codex::{quota::classify, sse::Decoder};
 use serde_json::json;
 
 #[test]

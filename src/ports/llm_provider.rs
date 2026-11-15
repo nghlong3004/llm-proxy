@@ -37,5 +37,3 @@ impl ProviderRegistry {
             .ok_or_else(|| ProxyError::invalid(format!("Provider '{name}' is not registered")))
     }
 }
-
-pub mod codex;

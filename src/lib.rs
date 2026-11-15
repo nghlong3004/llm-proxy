@@ -1,10 +1,10 @@
-//! Local protocol adapters and provider strategies for coding agents.
+//! Local gateway: domain/application depend on ports, concrete adapters are wired by bootstrap.
 pub mod accounts;
+pub mod adapters;
+pub mod application;
 pub mod authentication;
-pub mod cli;
+pub mod bootstrap;
 pub mod config;
 pub mod domain;
 pub mod logging;
-pub mod protocols;
-pub mod providers;
-pub mod server;
+pub mod ports;

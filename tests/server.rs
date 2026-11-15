@@ -6,11 +6,11 @@ use futures_util::{StreamExt, future::BoxFuture};
 use http_body_util::BodyExt;
 use llm_proxy::{
     accounts::{Account, Credential, Store},
+    adapters::inbound::http::router,
     config::Config,
     domain::error::{FailureKind, ProxyError},
     domain::*,
-    providers::{Provider, ProviderRegistry},
-    server::{AppState, router},
+    ports::llm_provider::{Provider, ProviderRegistry},
 };
 use serde_json::{Value, json};
 use std::{
@@ -89,7 +89,7 @@ fn admission_app() -> (tempfile::TempDir, axum::Router) {
         events: HashMap::from([(account.id, success())]),
         calls: Arc::new(Mutex::new(vec![])),
     }));
-    let app = router(AppState::new(
+    let app = router(llm_proxy::bootstrap::http_state(
         store,
         Config {
             default_model: Some("gpt-5.5".into()),
@@ -243,7 +243,11 @@ async fn hard_quota_switches_but_generic_429_does_not() {
         default_model: Some("gpt-5.5".into()),
         ..Default::default()
     };
-    let app = router(AppState::new(store.clone(), config, registry));
+    let app = router(llm_proxy::bootstrap::http_state(
+        store.clone(),
+        config,
+        registry,
+    ));
     let response = app.clone().oneshot(req(false)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response_json(response).await["content"][0]["text"], "works");
@@ -261,7 +265,7 @@ async fn hard_quota_switches_but_generic_429_does_not() {
     };
     let mut registry = ProviderRegistry::default();
     registry.register(Arc::new(fake));
-    let app = router(AppState::new(
+    let app = router(llm_proxy::bootstrap::http_state(
         store,
         Config {
             default_model: Some("gpt-5.5".into()),
@@ -307,7 +311,7 @@ async fn quota_after_start_does_not_replay_or_emit_success() {
     };
     let mut registry = ProviderRegistry::default();
     registry.register(Arc::new(fake));
-    let app = router(AppState::new(
+    let app = router(llm_proxy::bootstrap::http_state(
         store,
         Config {
             default_model: Some("gpt-5.5".into()),
@@ -326,7 +330,7 @@ async fn quota_after_start_does_not_replay_or_emit_success() {
 async fn known_all_quota_and_empty_pool_are_http_errors() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let app = router(AppState::new(
+    let app = router(llm_proxy::bootstrap::http_state(
         store.clone(),
         Config {
             default_model: Some("gpt-5.5".into()),
@@ -382,7 +386,7 @@ async fn dropping_client_body_cancels_backend_stream() {
     registry.register(Arc::new(PendingBackend {
         dropped: dropped.clone(),
     }));
-    let app = router(AppState::new(
+    let app = router(llm_proxy::bootstrap::http_state(
         store,
         Config {
             default_model: Some("gpt-5.5".into()),
@@ -443,7 +447,7 @@ async fn concurrent_relogin_reselects_without_marking_new_generation_exhausted()
         store: store.clone(),
         calls: calls.clone(),
     }));
-    let app = router(AppState::new(
+    let app = router(llm_proxy::bootstrap::http_state(
         store.clone(),
         Config {
             default_model: Some("gpt-5.5".into()),

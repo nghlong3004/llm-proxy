@@ -25,7 +25,7 @@ then run the example in that clone with `cargo run --locked --example
 llm_proxy_export_contract < cases.json > regenerated.json`. The helper constructs
 mock StoredAuth directly; it does not load token stores or make inference calls.
 
-The schema walkers in `src/providers/codex/schema.rs` are ported from that same
+The schema walkers in `src/adapters/outbound/codex/schema.rs` are ported from that same
 revision, rather than independently reimplemented. Removing pattern constraints
 relaxes tool argument validation, matching the reference's native compatibility
 policy; literal defaults/examples/property names are preserved.

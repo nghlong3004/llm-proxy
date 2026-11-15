@@ -1,7 +1,7 @@
 use llm_proxy::{
+    adapters::outbound::codex::{reasoning::ReasoningSigner, stream::Translator},
     domain::accumulator::Accumulator,
     domain::{Content, GenerationEvent, StopReason},
-    providers::codex::{reasoning::ReasoningSigner, stream::Translator},
 };
 use serde_json::json;
 fn translator() -> Translator {

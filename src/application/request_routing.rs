@@ -5,17 +5,7 @@ use crate::{
 };
 use std::sync::Arc;
 
-/// One immutable dispatch destination, retained across account failover.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RequestRoute {
-    pub provider: String,
-    pub model: String,
-}
-
-/// A small synchronous Strategy seam; implementations must not mutate global routing state.
-pub trait RequestRoutingPolicy: Send + Sync {
-    fn route(&self, request: &GenerationRequest) -> Result<RequestRoute, ProxyError>;
-}
+use crate::ports::request_routing::{RequestRoute, RequestRoutingPolicy};
 
 /// Configuration-driven routing, independent of the concrete provider implementations.
 pub struct ConfiguredRequestRoutingPolicy {

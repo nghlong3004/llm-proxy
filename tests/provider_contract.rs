@@ -1,10 +1,11 @@
 //! Golden requests produced by the real upstream translator, not by our mock.
 use llm_proxy::{
     accounts::Credential,
+    adapters::inbound::http::anthropic::Anthropic,
+    adapters::outbound::codex::{client::headers, reasoning::ReasoningSigner, request::translate},
     config::Config,
     domain::RequestContext,
-    protocols::{ProtocolAdapter, anthropic::Anthropic},
-    providers::codex::{client::headers, reasoning::ReasoningSigner, request::translate},
+    ports::protocol_adapter::ProtocolAdapter,
 };
 use serde_json::{Value, json};
 

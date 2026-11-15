@@ -1,8 +1,9 @@
 use llm_proxy::{
+    adapters::inbound::http::anthropic::Anthropic,
+    adapters::outbound::codex::{reasoning::ReasoningSigner, request::translate},
     config::Config,
     domain::{Content, RequestPurpose},
-    protocols::{ProtocolAdapter, anthropic::Anthropic},
-    providers::codex::{reasoning::ReasoningSigner, request::translate},
+    ports::protocol_adapter::ProtocolAdapter,
 };
 use serde_json::json;
 
@@ -189,7 +190,7 @@ fn anthropic_tools_and_images_become_native_codex_input() {
 fn forced_search_without_dedicated_marker_preserves_full_history_in_both_lanes() {
     for model_id in ["gpt-5.5", "gpt-6.1-sol"] {
         let request = Anthropic.decode(json!({"model":"sonnet","tools":[{"type":"web_search_20250305","name":"web_search"}],"tool_choice":{"type":"tool","name":"web_search"},"messages":[{"role":"user","content":"Earlier context about Rust"},{"role":"assistant","content":"Which release?"},{"role":"user","content":"Find its latest release"}]})).unwrap();
-        assert!(llm_proxy::providers::codex::search::query(&request).is_none());
+        assert!(llm_proxy::adapters::outbound::codex::search::query(&request).is_none());
         let config = Config {
             default_model: Some(model_id.into()),
             ..Default::default()
@@ -214,14 +215,14 @@ fn forced_search_without_dedicated_marker_preserves_full_history_in_both_lanes()
 fn dedicated_search_marker_keeps_the_direct_search_bridge() {
     let mut request = Anthropic.decode(json!({"model":"sonnet","tools":[{"type":"web_search_20250305","name":"web_search"}],"tool_choice":{"type":"tool","name":"web_search"},"messages":[{"role":"user","content":"Perform a web search for the query: Rust releases"}]})).unwrap();
     assert_eq!(
-        llm_proxy::providers::codex::search::query(&request).as_deref(),
+        llm_proxy::adapters::outbound::codex::search::query(&request).as_deref(),
         Some("Rust releases")
     );
     request.messages.push(llm_proxy::domain::Message {
         role: llm_proxy::domain::Role::User,
         content: vec![Content::Text("Follow up using earlier context".into())],
     });
-    assert!(llm_proxy::providers::codex::search::query(&request).is_none());
+    assert!(llm_proxy::adapters::outbound::codex::search::query(&request).is_none());
 }
 
 #[test]
@@ -230,7 +231,7 @@ fn direct_search_checks_query_and_structured_results_before_copying() {
         .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"search"}]}))
         .unwrap();
     assert!(
-        llm_proxy::providers::codex::search::events(
+        llm_proxy::adapters::outbound::codex::search::events(
             json!({"output":"answer"}),
             &request,
             &"x".repeat(16 * 1024 * 1024 + 1),
@@ -239,7 +240,9 @@ fn direct_search_checks_query_and_structured_results_before_copying() {
         .is_err()
     );
     let response = json!({"output":"answer","results":[{"url":"https://example.com","title":"x".repeat(16 * 1024 * 1024 + 1)}]});
-    assert!(llm_proxy::providers::codex::search::events(response, &request, "q", 1).is_err());
+    assert!(
+        llm_proxy::adapters::outbound::codex::search::events(response, &request, "q", 1).is_err()
+    );
 }
 
 #[test]
@@ -247,7 +250,7 @@ fn direct_search_preserves_normal_hosted_results_and_text() {
     let request = Anthropic
         .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"search"}]}))
         .unwrap();
-    let events = llm_proxy::providers::codex::search::events(json!({"output":"answer [source](https://example.com)","results":[{"url":"https://example.com","title":"Source"}]}), &request, "q", 1).unwrap();
+    let events = llm_proxy::adapters::outbound::codex::search::events(json!({"output":"answer [source](https://example.com)","results":[{"url":"https://example.com","title":"Source"}]}), &request, "q", 1).unwrap();
     let mut accumulator = llm_proxy::domain::accumulator::Accumulator::default();
     for event in events {
         accumulator.accept(event).unwrap();

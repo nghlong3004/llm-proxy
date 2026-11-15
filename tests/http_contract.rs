@@ -10,11 +10,11 @@ use axum::{
 use futures_util::TryStreamExt;
 use llm_proxy::{
     accounts::{AccountStatus, Credential, Store},
+    adapters::outbound::codex::client::Codex,
     authentication::AuthClient,
     config::Config,
     domain::*,
-    providers::Provider,
-    providers::codex::client::Codex,
+    ports::llm_provider::Provider,
 };
 use serde_json::{Value, json};
 type CapturedRequest = Arc<Mutex<Option<(HeaderMap, Value)>>>;
@@ -159,7 +159,7 @@ async fn cancelled_refresh_caller_does_not_lose_rotation_or_release_single_fligh
 #[tokio::test]
 #[ignore = "requires loopback sockets; run cargo test -- --include-ignored on the host"]
 async fn registry_shutdown_drains_cancelled_rotation_and_closes_refresh_admission() {
-    use llm_proxy::providers::ProviderRegistry;
+    use llm_proxy::ports::llm_provider::ProviderRegistry;
     let state = PausedRefresh::default();
     let (url, server) = serve(
         Router::new()
@@ -324,8 +324,8 @@ async fn http_sse_transport_headers_and_fragmented_utf8_follow_the_native_contra
         ..Default::default()
     };
     let provider = Codex::new(store, Arc::new(config)).unwrap();
-    use llm_proxy::protocols::ProtocolAdapter;
-    let request = llm_proxy::protocols::anthropic::Anthropic
+    use llm_proxy::ports::protocol_adapter::ProtocolAdapter;
+    let request = llm_proxy::adapters::inbound::http::anthropic::Anthropic
         .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"hello"}]}))
         .unwrap();
     let events = provider
@@ -403,10 +403,7 @@ async fn refresh_revocation_marks_only_the_rejected_account() {
 #[tokio::test]
 #[ignore = "requires loopback sockets; run cargo test -- --include-ignored on the host"]
 async fn anthropic_http_request_fails_over_to_codex_account_b_and_stays_there() {
-    use llm_proxy::{
-        providers::ProviderRegistry,
-        server::{AppState, router},
-    };
+    use llm_proxy::{adapters::inbound::http::router, ports::llm_provider::ProviderRegistry};
     let attempts = Arc::new(Mutex::new(Vec::<String>::new()));
     async fn upstream(
         State(attempts): State<Arc<Mutex<Vec<String>>>>,
@@ -455,8 +452,12 @@ async fn anthropic_http_request_fails_over_to_codex_account_b_and_stays_there() 
     registry.register(Arc::new(
         Codex::new(store.clone(), Arc::new(config.clone())).unwrap(),
     ));
-    let (proxy_url, proxy_server) =
-        serve(router(AppState::new(store.clone(), config, registry))).await;
+    let (proxy_url, proxy_server) = serve(router(llm_proxy::bootstrap::http_state(
+        store.clone(),
+        config,
+        registry,
+    )))
+    .await;
     let client = reqwest::Client::new();
     for stream in [false, true] {
         let response = client.post(format!("{proxy_url}/v1/messages"))
@@ -534,8 +535,8 @@ async fn lite_http_request_must_match_the_real_raine_translator_contract() {
             ..Default::default()
         };
         let provider = Codex::new(store, Arc::new(config)).unwrap();
-        use llm_proxy::protocols::ProtocolAdapter;
-        let request = llm_proxy::protocols::anthropic::Anthropic
+        use llm_proxy::ports::protocol_adapter::ProtocolAdapter;
+        let request = llm_proxy::adapters::inbound::http::anthropic::Anthropic
             .decode(fixture["input"].clone())
             .unwrap();
         let events = provider
@@ -561,7 +562,7 @@ async fn lite_http_request_must_match_the_real_raine_translator_contract() {
 
 #[tokio::test]
 async fn corrupt_selected_credential_is_storage_failure_not_reselection_or_transport() {
-    use llm_proxy::{domain::error::FailureKind, protocols::ProtocolAdapter};
+    use llm_proxy::{domain::error::FailureKind, ports::protocol_adapter::ProtocolAdapter};
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let account = store.login("a", credential("a", 0)).unwrap();
@@ -575,7 +576,7 @@ async fn corrupt_selected_credential_is_storage_failure_not_reselection_or_trans
         ..Default::default()
     };
     let provider = Codex::new(store, Arc::new(config)).unwrap();
-    let request = llm_proxy::protocols::anthropic::Anthropic
+    let request = llm_proxy::adapters::inbound::http::anthropic::Anthropic
         .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"synthetic"}]}))
         .unwrap();
     let error = match provider
@@ -598,7 +599,7 @@ async fn corrupt_selected_credential_is_storage_failure_not_reselection_or_trans
 #[tokio::test]
 #[ignore = "requires loopback sockets; run cargo test -- --include-ignored on the host"]
 async fn selected_removed_or_replaced_account_is_not_transport_or_refreshed() {
-    use llm_proxy::{domain::error::FailureKind, protocols::ProtocolAdapter};
+    use llm_proxy::{domain::error::FailureKind, ports::protocol_adapter::ProtocolAdapter};
     let calls = Arc::new(AtomicUsize::new(0));
     async fn unexpected(State(calls): State<Arc<AtomicUsize>>) -> StatusCode {
         calls.fetch_add(1, Ordering::SeqCst);
@@ -631,7 +632,7 @@ async fn selected_removed_or_replaced_account_is_not_transport_or_refreshed() {
             AuthClient::with_issuer(url.clone()).unwrap(),
         )
         .unwrap();
-        let request = llm_proxy::protocols::anthropic::Anthropic
+        let request = llm_proxy::adapters::inbound::http::anthropic::Anthropic
             .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"synthetic"}]}))
             .unwrap();
         let error = match provider
@@ -673,8 +674,8 @@ async fn native_validation_failure_preserves_status_and_safe_parameter_without_b
         ..Default::default()
     };
     let provider = Codex::new(store, Arc::new(config)).unwrap();
-    use llm_proxy::protocols::ProtocolAdapter;
-    let request = llm_proxy::protocols::anthropic::Anthropic
+    use llm_proxy::ports::protocol_adapter::ProtocolAdapter;
+    let request = llm_proxy::adapters::inbound::http::anthropic::Anthropic
         .decode(json!({"model":"sonnet","messages":[{"role":"user","content":"synthetic"}]}))
         .unwrap();
     let error = match provider
