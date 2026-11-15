@@ -55,6 +55,13 @@ impl From<anyhow::Error> for RefreshError {
     }
 }
 impl AuthClient {
+    pub(super) fn ensure_refresh_open(&self) -> Result<()> {
+        if self.closing.load(Ordering::Acquire) {
+            bail!("OAuth client is shutting down");
+        }
+        Ok(())
+    }
+
     pub(super) fn with_flavor(issuer: String, flavor: Flavor) -> Result<Self> {
         Ok(Self {
             client: reqwest::Client::builder()

@@ -8,13 +8,14 @@ use crate::{
     ports::account_repository::{
         AccountCommandRepository, AccountUsageRepository, InferenceAccountRepository, ResetGuard,
     },
+    private_state::{atomic_bytes, lock_file, private_dir, private_open},
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::{BTreeMap, HashSet},
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    fs::{self, File},
+    io::Read,
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -759,30 +760,6 @@ fn next_operation(registry: &mut Registry) -> Result<u64> {
 fn identity_key(provider: &str, subject: &str, workspace: &str) -> Result<String> {
     Ok(serde_json::to_string(&(provider, subject, workspace))?)
 }
-fn private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-fn private_open(path: &Path) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(false).read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    Ok(options.open(path)?)
-}
-fn lock_file(path: &Path) -> Result<File> {
-    let file = private_open(path)?;
-    file.lock()?;
-    Ok(file)
-}
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     let mut file = match File::open(path) {
         Ok(file) => file,
@@ -802,27 +779,4 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 }
 fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     atomic_bytes(path, &serde_json::to_vec_pretty(value)?)
-}
-fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().context("Invalid state path")?;
-    let temp = parent.join(format!(".tmp-{}", Uuid::new_v4()));
-    let result = (|| -> Result<()> {
-        let mut options = OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temp, path)?;
-        File::open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temp);
-    }
-    result
 }

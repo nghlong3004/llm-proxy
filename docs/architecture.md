@@ -68,8 +68,10 @@ validation. AGY capabilities and provenance are documented in [antigravity](anti
   refresh transaction, which survives client cancellation and drains on shutdown.
   `authentication/oauth.rs` owns this lifecycle and generation-safe publication;
   `codex.rs` and `agy.rs` own their grants, wire formats and revocation semantics.
-  AGY OAuth client ID/secret are supplied through the proxy process environment,
-  never embedded in source or fixtures.
+  AGY lazily resolves its OAuth client from an integrity-pinned, data-only public
+  reference cached in the selected private state; a complete environment pair can
+  override it. No client values are embedded in source/fixtures, and construction
+  or offline status never downloads configuration.
 - Confirmed quota or definite credential rejection can switch accounts before output;
   removed/changed accounts can reselect before dispatch. Never replay uncertain work
   or events already emitted. Quota reset does not displace a healthy active account.

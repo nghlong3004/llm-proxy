@@ -36,7 +36,8 @@ pub struct Agy {
 
 impl Agy {
     pub fn new(store: Store, config: Arc<Config>) -> anyhow::Result<Self> {
-        Self::with_auth(store, config, AuthClient::agy()?)
+        let auth = AuthClient::agy_with_state_dir(store.root())?;
+        Self::with_auth(store, config, auth)
     }
 
     pub fn with_auth(store: Store, config: Arc<Config>, auth: AuthClient) -> anyhow::Result<Self> {

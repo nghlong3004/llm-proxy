@@ -10,6 +10,7 @@
 # Proxy state may be placed inside the checkout with --state-dir.
 accounts.json
 credentials/
+agy-oauth-client/
 reasoning.key
 registry.lock
 locks/

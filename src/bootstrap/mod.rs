@@ -54,9 +54,12 @@ pub async fn login_provider(
         "Antigravity does not support device-code login; use accounts add agy --name NAME"
     );
     let agy = provider == "agy";
+    let state_dir = store.root().to_owned();
     account_commands::login_for(store, provider, name, async move {
         if agy {
-            return AuthClient::agy()?.agy_browser_login().await;
+            return AuthClient::agy_with_state_dir(&state_dir)?
+                .agy_browser_login()
+                .await;
         }
         let auth = AuthClient::new()?;
         match method {
