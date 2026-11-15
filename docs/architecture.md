@@ -11,8 +11,8 @@ outbound adapters implement ports; bootstrap composes implementations
 | --- | --- |
 | `bootstrap/` | Concrete wiring, configuration, logging and process lifecycle |
 | `domain/` | Neutral requests, events, errors and buffered accumulator |
-| `application/` | Generation preflight, routing, failover, token count, account use cases |
-| `ports/` | ProtocolAdapter, Provider/registry, RequestRoutingPolicy, TokenEstimator |
+| `application/` | Generation preflight, routing, failover, token count, account/usage/reset use cases |
+| `ports/` | ProtocolAdapter, Provider/registry, RequestRoutingPolicy, TokenEstimator, optional account usage |
 | `adapters/inbound/cli/` | Clap parsing and output formatting |
 | `adapters/inbound/http/` | HTTP parsing, admission, SSE/buffered delivery, cancellation |
 | `adapters/inbound/http/anthropic/` | Anthropic Messages translation and SSE encoding |
@@ -52,6 +52,34 @@ and does not apply review routing. Defaults live in config, not provider code.
 - Confirmed quota or definite credential rejection can switch accounts before output;
   removed/changed accounts can reselect before dispatch. Never replay uncertain work
   or events already emitted. Quota reset does not displace a healthy active account.
+
+## Account telemetry and manual resets
+
+`accounts status [provider]` reads cached registry metadata without credentials, model config,
+HTTP setup or eligibility changes. An optional account-usage port provides native
+snapshot decoding, live reads and reset capabilities independently of inference.
+Bootstrap wires it; application filters providers and orchestrates bounded refreshes;
+CLI renders allowlisted DTOs. Windows are provider-defined; unknown, unsupported,
+known zero, unlimited, stale observations and read errors remain distinct.
+
+`accounts status --refresh` explicitly uses proxy-owned OAuth and stores observed usage only
+for the captured generation. Authoritative live `ordinary_usage_allowed=true` also
+clears a captured quota-exhausted state via generation/status-revision checks, so
+resets performed outside the proxy can be recognized manually. It never clears
+NeedsLogin, changes active placement, or overwrites a newer status observation.
+Missing/false availability, read errors and cached observations do not recover quota;
+percentages never mark exhaustion. There is no background polling. Codex uses a
+separate account API base; its verified backend contract and source pin are documented
+beside the adapter. No Codex CLI process is started.
+
+`accounts reset-quota` requires one provider/account and explicit `--yes`. It consumes a banked
+reset, not a prepaid-credit purchase. A private atomic journal reserves the logical
+request UUID before dispatch; a separate cross-process lock serializes each account's
+resets. Uncertain dispatch remains pending/unknown and blocks a new key; only an
+explicit retry reuses the recorded key. Backend idempotency retention is not promised.
+Confirmed results survive failed follow-up reads. Only authoritative post-reset
+availability can clear captured quota via generation/status-revision compare-and-set;
+it never clears revoked authentication, resurrects accounts or steals active placement.
 
 ## Resource ownership
 

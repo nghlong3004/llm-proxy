@@ -1,4 +1,7 @@
 //! Private, atomic account storage shared by CLI and server processes.
+use crate::domain::account_usage::{
+    ResetAttempt, ResetAttemptState, UsageObservation, UsageSource,
+};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
@@ -50,6 +53,10 @@ pub struct Account {
     pub status: AccountStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_observation: Option<UsageObservation>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub status_revision: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Registry {
@@ -83,7 +90,7 @@ pub struct LoginTicket {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum SelectionError {
-    #[error("No signed-in account is available. Run: llm-proxy accounts login --name NAME")]
+    #[error("No signed-in account is available. Run: llm-proxy accounts add codex --name NAME")]
     NoAccounts,
     #[error("All accounts have exhausted their quota; retry in {retry_after} seconds")]
     Exhausted { retry_after: u64 },
@@ -216,6 +223,8 @@ impl Store {
             generation: credential.generation.clone(),
             status: AccountStatus::Available,
             usage: None,
+            usage_observation: None,
+            status_revision: 0,
         };
         // Credentials are durable before publishing a new account in the registry.
         atomic_json(
@@ -256,16 +265,31 @@ impl Store {
         File::open(directory)?.sync_all()?;
         Ok(())
     }
+    /// Resolve a unique UUID prefix while holding the same lock used for removal.
     pub fn remove(&self, id: &str) -> Result<()> {
-        validate_id(id)?;
+        if id.len() < 8
+            || id.len() > 36
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+        {
+            bail!("Use a full account UUID or an ID prefix of at least 8 characters");
+        }
+        let prefix = id.to_ascii_lowercase();
         let _guard = self.registry_lock()?;
         let mut registry = self.read_registry()?;
-        let account = registry
+        let mut matches = registry
             .accounts
             .iter()
-            .find(|account| account.id == id)
-            .context("Unknown account ID")?
+            .filter(|account| account.id.starts_with(&prefix));
+        let account = matches
+            .next()
+            .context("No account matches that ID or prefix")?
             .clone();
+        if matches.next().is_some() {
+            bail!("Account ID prefix is ambiguous; use a longer prefix or the full UUID");
+        }
+        let id = account.id.as_str();
         let sequence = next_operation(&mut registry)?;
         registry.identity_operations.insert(
             identity_key(&account.provider, &account.subject, &account.workspace)?,
@@ -343,6 +367,10 @@ impl Store {
             if matches!(account.status, AccountStatus::QuotaExhausted { reset_at } if reset_at <= time)
             {
                 account.status = AccountStatus::Available;
+                account.status_revision = account
+                    .status_revision
+                    .checked_add(1)
+                    .context("Account status counter exhausted")?;
                 dirty = true;
             }
         }
@@ -423,7 +451,149 @@ impl Store {
         )
     }
     pub fn record_usage(&self, id: &str, generation: &str, usage: serde_json::Value) -> Result<()> {
-        self.update_account(id, generation, |a| a.usage = Some(usage), false, now())
+        self.record_usage_observed(
+            id,
+            generation,
+            usage,
+            UsageObservation {
+                observed_at: Some(now()),
+                source: UsageSource::Inference,
+            },
+        )
+        .map(|_| ())
+    }
+    /// Telemetry never changes eligibility or the provider's active account.
+    pub fn record_usage_observed(
+        &self,
+        id: &str,
+        generation: &str,
+        usage: serde_json::Value,
+        observation: UsageObservation,
+    ) -> Result<bool> {
+        let _guard = self.registry_lock()?;
+        let mut registry = self.read_registry()?;
+        let Some(account) = registry
+            .accounts
+            .iter_mut()
+            .find(|account| account.id == id && account.generation == generation)
+        else {
+            return Ok(false);
+        };
+        if let (Some(previous), Some(incoming)) = (
+            account
+                .usage_observation
+                .as_ref()
+                .and_then(|o| o.observed_at),
+            observation.observed_at,
+        ) && previous > incoming
+        {
+            return Ok(true);
+        }
+        account.usage = Some(usage);
+        account.usage_observation = Some(observation);
+        self.save_registry(&registry)?;
+        Ok(true)
+    }
+    /// A live provider confirmation can recover quota, never authentication or newer status.
+    /// The caller must have received authoritative ordinary-usage availability, not percentages.
+    pub fn reconcile_refreshed_quota(&self, observed: &Account) -> Result<Option<AccountStatus>> {
+        let _guard = self.registry_lock()?;
+        let mut registry = self.read_registry()?;
+        let Some(account) = registry.accounts.iter_mut().find(|account| {
+            account.id == observed.id
+                && account.generation == observed.generation
+                && account.provider == observed.provider
+        }) else {
+            return Ok(None);
+        };
+        if account.status_revision == observed.status_revision
+            && matches!(account.status, AccountStatus::QuotaExhausted { .. })
+        {
+            account.status = AccountStatus::Available;
+            account.status_revision = account
+                .status_revision
+                .checked_add(1)
+                .context("Account status counter exhausted")?;
+            let status = account.status.clone();
+            self.save_registry(&registry)?;
+            return Ok(Some(status));
+        }
+        // Return the actual status even if a concurrent observation prevented recovery.
+        Ok(Some(account.status.clone()))
+    }
+    /// Separate from OAuth locks: reset serialization must not block token publication.
+    pub fn try_quota_reset_lock(&self, id: &str) -> Result<Option<File>> {
+        validate_id(id)?;
+        let file = private_open(
+            &self
+                .root
+                .join("locks")
+                .join(format!("{id}.quota-reset.lock")),
+        )?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+    pub fn reset_attempt(&self, id: &str) -> Result<Option<ResetAttempt>> {
+        validate_id(id)?;
+        let attempt: Option<ResetAttempt> =
+            read_json(&self.root.join(format!("quota-reset-{id}.json")))?;
+        if let Some(attempt) = &attempt {
+            validate_id(&attempt.request_id)?;
+            validate_id(&attempt.generation)?;
+            if attempt.account_id != id {
+                bail!("Reset journal account mismatch");
+            }
+        }
+        Ok(attempt)
+    }
+    /// The caller holds the per-account reset lock, including while dispatch is uncertain.
+    pub fn save_reset_attempt(&self, attempt: &ResetAttempt) -> Result<()> {
+        validate_id(&attempt.account_id)?;
+        validate_id(&attempt.generation)?;
+        validate_id(&attempt.request_id)?;
+        atomic_json(
+            &self
+                .root
+                .join(format!("quota-reset-{}.json", attempt.account_id)),
+            attempt,
+        )
+    }
+    /// Only authoritative post-redemption availability can clear the captured quota state.
+    pub fn reconcile_quota_reset(&self, attempt: &ResetAttempt, allowed: bool) -> Result<bool> {
+        if !allowed
+            || !matches!(
+                &attempt.state,
+                ResetAttemptState::Confirmed(outcome) if outcome.confirms_redemption()
+            )
+        {
+            return Ok(false);
+        }
+        let _guard = self.registry_lock()?;
+        let mut registry = self.read_registry()?;
+        let Some(account) = registry.accounts.iter_mut().find(|account| {
+            account.id == attempt.account_id
+                && account.generation == attempt.generation
+                && account.provider == attempt.provider
+                && account.status_revision == attempt.status_revision
+        }) else {
+            return Ok(false);
+        };
+        match account.status {
+            AccountStatus::NeedsLogin => return Ok(false),
+            AccountStatus::Available => return Ok(true),
+            AccountStatus::QuotaExhausted { .. } => {
+                account.status = AccountStatus::Available;
+                account.status_revision = account
+                    .status_revision
+                    .checked_add(1)
+                    .context("Account status counter exhausted")?;
+            }
+        }
+        self.save_registry(&registry)?;
+        Ok(true)
     }
     fn update_account(
         &self,
@@ -443,6 +613,12 @@ impl Store {
             return Ok(());
         };
         update(&mut registry.accounts[index]);
+        if advance {
+            registry.accounts[index].status_revision = registry.accounts[index]
+                .status_revision
+                .checked_add(1)
+                .context("Account status counter exhausted")?;
+        }
         let provider = registry.accounts[index].provider.clone();
         if advance && registry.active.get(&provider).map(String::as_str) == Some(id) {
             let length = registry.accounts.len();
@@ -533,6 +709,9 @@ impl Store {
         atomic_bytes(&path, &key)?;
         Ok(key)
     }
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 fn validate_id(id: &str) -> Result<()> {
     Uuid::parse_str(id).context("Invalid account ID")?;

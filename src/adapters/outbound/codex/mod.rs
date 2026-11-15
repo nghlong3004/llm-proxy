@@ -1,4 +1,5 @@
 //! Codex provider: native wire protocol, independent transport and error classification.
+pub mod account_usage;
 pub mod client;
 pub mod quota;
 pub mod reasoning;

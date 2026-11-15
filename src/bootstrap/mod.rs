@@ -28,7 +28,20 @@ pub async fn open_store(state_dir: Option<PathBuf>) -> Result<Store> {
 }
 
 pub async fn login(store: Store, name: String, method: LoginMethod) -> Result<Account> {
-    account_commands::login(store, name, async move {
+    login_provider(store, "codex".into(), name, method).await
+}
+
+pub async fn login_provider(
+    store: Store,
+    provider: String,
+    name: String,
+    method: LoginMethod,
+) -> Result<Account> {
+    anyhow::ensure!(
+        provider == "codex",
+        "Unsupported login provider; available: codex"
+    );
+    account_commands::login_for(store, provider, name, async move {
         let auth = AuthClient::new()?;
         match method {
             LoginMethod::Browser => auth.browser_login().await,
@@ -36,6 +49,79 @@ pub async fn login(store: Store, name: String, method: LoginMethod) -> Result<Ac
         }
     })
     .await
+}
+
+async fn account_usage_service(
+    store: Store,
+    live: bool,
+) -> std::result::Result<
+    crate::application::account_usage::AccountUsageService,
+    crate::domain::account_usage::UsageError,
+> {
+    use crate::{
+        adapters::outbound::codex::account_usage::CodexAccountUsage,
+        application::account_usage::AccountUsageService, domain::account_usage::UsageError,
+    };
+    let implementation = if live {
+        let client_store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            let config =
+                Config::load(client_store.root()).map_err(|_| UsageError::Configuration)?;
+            config::validate_endpoint(&config.codex_account_endpoint)
+                .map_err(|_| UsageError::Configuration)?;
+            let auth = AuthClient::new().map_err(|_| UsageError::Configuration)?;
+            CodexAccountUsage::with_auth(client_store, config.codex_account_endpoint, auth)
+        })
+        .await
+        .map_err(|_| UsageError::Configuration)??
+    } else {
+        CodexAccountUsage::cached()
+    };
+    Ok(AccountUsageService::new(
+        store,
+        vec![Arc::new(implementation)],
+    ))
+}
+
+pub async fn account_status(
+    store: Store,
+    provider: Option<String>,
+    refresh: bool,
+) -> std::result::Result<
+    crate::domain::account_usage::StatusReport,
+    crate::domain::account_usage::UsageError,
+> {
+    use crate::domain::account_usage::UsageError;
+    let service = account_usage_service(store, refresh).await?;
+    let result = tokio::select! {
+        result = service.status(provider.as_deref(), refresh) => result,
+        _ = tokio::signal::ctrl_c() => Err(UsageError::Interrupted),
+    };
+    service.shutdown().await;
+    result
+}
+
+pub async fn reset_quota(
+    store: Store,
+    provider: String,
+    id: String,
+    confirm: bool,
+    retry: Option<String>,
+) -> std::result::Result<
+    crate::domain::account_usage::ResetReport,
+    crate::domain::account_usage::UsageError,
+> {
+    use crate::domain::account_usage::UsageError;
+    if provider != "codex" {
+        return Err(UsageError::Unsupported);
+    }
+    let service = account_usage_service(store, true).await?;
+    let result = tokio::select! {
+        result = service.reset(&provider, &id, confirm, retry.as_deref()) => result,
+        _ = tokio::signal::ctrl_c() => Err(UsageError::Interrupted),
+    };
+    service.shutdown().await;
+    result
 }
 
 pub fn http_state(store: Store, config: Config, providers: ProviderRegistry) -> AppState {

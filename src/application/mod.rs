@@ -1,6 +1,7 @@
 //! Transport-independent use cases; concrete implementations enter only through ports.
 pub mod account_commands;
 mod account_failover;
+pub mod account_usage;
 pub mod request_routing;
 
 use crate::{
