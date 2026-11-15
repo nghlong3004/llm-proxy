@@ -1,69 +1,43 @@
-# LLM Proxy — contributor instructions
+# Agent instructions
 
-## Workflow and continuity
+## Working context
 
-Use `project-context` when resuming, checkpointing or handing off; if unavailable,
-read `.agents/skills/project-context/SKILL.md`. Never rely on chat history alone.
-Before modifying code, read in order:
+- Read `docs/implementation-progress.md` first. Consult `docs/architecture.md` for
+  boundaries and `docs/conventions.md` for commands/style relevant to the task.
+- Keep the checkpoint current after milestones: present state, actual checks, blockers,
+  next action. Replace obsolete notes; use Git for history. Write agent docs in English.
+- Preserve unrelated work. Keep changes focused; update affected interfaces/docs.
+- Use `rust-best-practices` and `rust-async-patterns` for Rust changes.
 
-1. `docs/implementation-progress.md` — current state, checks, blockers, next steps.
-2. `docs/architecture.md` — boundaries, data flow and invariants.
-3. `docs/superpowers/plans/2026-11-12-llm-proxy-v1.md` — approved scope.
-4. `docs/conventions.md` — names, commands and reference provenance.
+## Boundaries
 
-Follow approved decisions; explain conflicts/critical assumptions before irreversible
-changes. Update progress immediately after each milestone/material decision; replace
-obsolete checkpoints instead of appending transcripts. Update architecture/usage docs
-when interfaces, commands or structure change. Use `rust-best-practices` and
-`rust-async-patterns` when implementing/reviewing Rust.
+- `bootstrap/` composes implementations; `domain/`, `application/`, `ports/` must not
+  import adapters, bootstrap, Axum or reqwest. Follow `docs/architecture.md`.
+- CLI parses/formats; HTTP owns transport/admission; application owns use cases.
+- Proxy never executes agent tools. Claude Code owns filesystem, shell and agent loop.
+- Rust 1.100.0, edition 2024; keep `Cargo.lock`. Run rustfmt (width 100); manually
+  format macro bodies it leaves dense. Avoid packed statements and unnecessary traits.
+- Use meaningful enums/Result, no unwrap/expect outside tests. Move blocking I/O,
+  locks and CPU-heavy work to spawn_blocking; no registry lock across network await.
 
-## Product and boundaries
+## Invariants
 
-- Rust 1.100.0, edition 2024; compatible stable dependencies, commit `Cargo.lock`.
-- Use stable rustfmt (`rustfmt.toml`, width 100); manually expand dense macro bodies
-  that rustfmt does not format. Do not pack branches/statements into one line.
-- CLI-managed localhost proxy using multiple Codex subscription accounts. Preserve
-  active account until confirmed exhaustion; runtime account changes affect later requests.
-- Target Claude Code tools/images/reasoning/structured output/SSE/WebSearch/portable
-  compaction; reference `raine/claude-code-proxy`. **Never execute agent tools:**
-  Claude Code owns files, shell and the agent loop.
-- Follow layout B in `docs/architecture.md`: bootstrap composes concrete adapters;
-  domain/application/ports must not import adapters/bootstrap/HTTP libraries. Inbound
-  CLI parses/formats, HTTP owns parsing/admission/SSE/cancel, application owns use
-  cases/routing/failover. Accounts/authentication/logging keep their isolated roles.
+- State directories 0700, files 0600; atomic writes and cross-process locking.
+- Identity includes user/workspace. Stale login/refresh must not overwrite newer
+  credentials or resurrect removed accounts; mutations preserve in-flight leases.
+- Never log prompts, tokens, OAuth codes, tool payloads or encrypted reasoning;
+  never commit credentials or forward incoming client auth as a provider credential.
+- Bound bodies/buffers/work. Keep native listeners and Docker host publication on
+  loopback; wildcard bind only inside isolated containers. Listener has no client auth.
+- Quota failover requires confirmed exhaustion, not generic 429/model/permission/
+  network/5xx failures. Pre-output credential rejection or account change may reselect;
+  storage errors are not account changes. Never replay after output or uncertain dispatch.
+- Replay encrypted reasoning only with verified account/generation/model identity.
+- Disconnect cancels inference. Blocking jobs retain permits until completion;
+  dispatched refresh persists independently and drains during graceful shutdown.
+- Classifier errors remain errors; never synthesize an approval verdict.
 
-## Mandatory invariants
-
-### Security
-- Private directories `0700`, files `0600`; atomic replacement + cross-process locking.
-- Identity distinguishes users in one workspace. Stale login/refresh must neither
-  overwrite newer credentials nor resurrect removed accounts.
-- Never log prompts, tokens, OAuth codes or encrypted reasoning; never commit credentials.
-- Never forward incoming `ANTHROPIC_AUTH_TOKEN` as a Codex credential.
-- Bound upstream requests/bodies. Listener has **no client authentication**: native
-  defaults and Docker host publication stay loopback; wildcard bind only explicitly
-  inside isolated containers. Never import host credentials into images.
-
-### Routing and lifecycle
-- Quota failover requires confirmed exhaustion, not generic 429, model/permission,
-  network or 5xx errors. Before output, definite credential rejection or account
-  removal/change before dispatch may safely reselect; unrelated storage/network
-  errors must not be classified as account changes.
-- Never replay after a message/content event or uncertain upstream processing.
-- Encrypted reasoning replay requires verified account, generation and model identity.
-- Mutations must not corrupt in-flight state. Disconnect cancels inference; retain
-  permits until outstanding blocking jobs finish. Dispatched OAuth refresh instead
-  finishes guarded persistence independently of the client and drains on shutdown.
-
-### Rust/async
-- Meaningful enums and `Result`; no `unwrap`/`expect` outside tests. Focused functions,
-  abstractions only for concrete needs, explicit errors over implicit fallbacks.
-- CPU-intensive work and blocking filesystem/locks use `spawn_blocking`.
-- Never hold registry locks across network `.await`.
-
-## Verification and authorization
-
-Before reporting implementation complete, run and report each actual PASS/FAIL/BLOCKED:
+## Verification
 
 ```sh
 cargo fmt --check
@@ -72,12 +46,10 @@ cargo test --locked -- --include-ignored
 cargo build --release --locked
 ```
 
-Use cached dependencies with `--offline` if needed. Code changes alone are not
-verification; distinguish mock tests from real Claude Code/subscription acceptance.
-Docker changes also require image build + isolated Compose smoke: non-root, private
-persistent state, loopback publication, SIGINT shutdown; unique project/disposable
-synthetic state/random host port, without altering an existing service.
+Use `--offline` with cached dependencies when needed. Report actual PASS/FAIL/BLOCKED;
+distinguish mock checks from live integration. Docker changes also need image build
+and isolated `scripts/check-docker.py` smoke (disposable project/state/random port).
+Checks/scripts are listed in `docs/conventions.md`.
 
-Never inspect existing credentials, run live authenticated tests, publish, push or
-deploy without explicit authorization. Preserve MIT attribution/reference revisions.
-Prefer targeted changes; preserve unrelated user work.
+Do not inspect existing credentials, run authenticated live tests, alter services,
+commit, push or deploy without authorization. Preserve MIT attribution and provenance.

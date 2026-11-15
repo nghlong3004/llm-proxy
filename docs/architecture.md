@@ -1,114 +1,76 @@
-# Kiến trúc llm-proxy
+# Architecture
 
-## Luồng và ranh giới
+Single Rust crate with hexagonal dependency boundaries:
 
 ```text
-Claude Code → inbound HTTP/Anthropic → domain request → application → ports → Codex adapter
-Claude Code ← inbound HTTP/Anthropic ← domain events  ← application ← ports ← Codex adapter
+inbound adapters → application → domain + ports
+outbound adapters implement ports; bootstrap composes implementations
 ```
 
-Layout B (Hexagonal), được user chọn ngày 2026-11-15. Một crate/binary; không agent
-runtime hoặc JEV giả. `bootstrap/` nối implementations; inner layers không import
-adapters/bootstrap/Axum/reqwest, được regression test kiểm tra. Streaming và buffered
-dùng cùng EventStream. Rust 1.100.0, edition 2024; format theo `rustfmt.toml`.
-
-| Module | Trách nhiệm |
+| Module | Responsibility |
 | --- | --- |
-| `main.rs`, `bootstrap/` | Entrypoint, concrete composition, logging/server lifecycle |
-| `domain/` | Request/content/event/error/accumulator trung lập |
-| `application/` | Generation preflight, request routing, account failover, count/health/account use cases |
-| `ports/` | ProtocolAdapter, Provider/registry, RequestRoutingPolicy, TokenEstimator interfaces |
-| `adapters/inbound/cli/` | Clap, dispatch và output formatting |
-| `adapters/inbound/http/` | Parsing/admission/response/SSE/cancellation ownership |
-| `adapters/inbound/http/anthropic/` | Anthropic adapter và SSE encoder |
-| `adapters/outbound/codex/` | Native client/translation/quota/search/reasoning, tokenizer implementation |
-| `accounts/`, `authentication/` | Identity/private storage/selection và independent OAuth/refresh |
-| `config.rs`, `logging/` | Configuration/model registry và safe bounded JSONL |
-| `tests/` | Behavioral tests và dependency-direction guards |
+| `bootstrap/` | Concrete wiring, configuration, logging and process lifecycle |
+| `domain/` | Neutral requests, events, errors and buffered accumulator |
+| `application/` | Generation preflight, routing, failover, token count, account use cases |
+| `ports/` | ProtocolAdapter, Provider/registry, RequestRoutingPolicy, TokenEstimator |
+| `adapters/inbound/cli/` | Clap parsing and output formatting |
+| `adapters/inbound/http/` | HTTP parsing, admission, SSE/buffered delivery, cancellation |
+| `adapters/inbound/http/anthropic/` | Anthropic Messages translation and SSE encoding |
+| `adapters/outbound/codex/` | Codex client, translation, quota, reasoning, search, tokenizer |
+| `accounts/` | Identity, credential persistence, selection and account state |
+| `authentication/` | OAuth, callback validation and single-flight refresh |
+| `config.rs`, `logging/` | Model/config registry and bounded metadata logging |
 
-Không giữ aliases module cũ. History `system` text vẫn giữ vị trí, Codex map thành
-`developer`. HTTP lấy admission trước JSON; application nhận work permit và giữ
-clone trong blocking jobs. Token count gọi injected TokenEstimator, không gọi Codex
-trực tiếp từ HTTP/application. `bootstrap::http_state` hỗ trợ composition trong tests.
+`domain/application/ports` never import adapters, bootstrap or HTTP libraries.
+`bootstrap::http_state` composes injectable components; architecture tests guard
+these dependencies. Both response modes consume the same neutral EventStream.
 
-## Action-review routing
+## Request lifecycle
 
-- `ProtocolAdapter::request_purpose(&Value)` nhận `ActionReview` khi non-streaming,
-  không tools, exact classifier prefix ở đầu system string/text block. Không scan
-  user text; đây là routing hint, không xác thực/quyền. Adapter khác mặc định
-  `Conversation`; `count_tokens` không áp dụng policy này.
-- `RequestRoutingPolicy` chọn immutable `{ provider, model }` một lần/request từ
-  neutral purpose. Validate model gốc rồi route hiệu dụng; failover giữ cùng route.
-  Conversation mặc định giữ precedence lỗi no-account cũ; review/provider override
-  validate provider trước select. Không mutate config/default provider/affinity.
-- `[auto_review]` mặc định model `gpt-6-luna`, provider kế thừa `default_provider`;
-  model/provider explicit vẫn override qua registry. Alias như `model = "sonnet"`
-  theo mapping hiện hành; suffix service tier được giữ. Không hardcode Luna trong
-  Provider. Unknown model/provider trả lỗi, không fallback ngầm.
-- Giữ transcript/schema/effort; bỏ session/cache identity và encrypted-reasoning
-  replay (giữ summary text). Response Start giữ model client đã yêu cầu; log phân
-  biệt requested/routed/native model theo request ID. Không parse output thành
-  verdict hoặc tự tạo allow. `Provider`/`RequestContext` không đổi interface.
-- Client dùng `CLAUDE_CODE_AUTO_MODE_SERVER=0`; không implement server safeguards.
-  JEV chờ API/auth contract, chưa đăng ký provider. Mock wire/fail-closed pass không
-  chứng minh safety tương đương Claude, entitlement hay tỷ lệ tiết kiệm quota thật.
+1. HTTP acquires admission before parsing JSON, then decodes through ProtocolAdapter.
+2. Application validates the model, selects an immutable provider/model route and
+   leases the first eligible account before returning the event stream.
+3. Account failover preserves the route; Provider revalidates credentials/generation.
+4. HTTP encodes events or accumulates a response. Drop cancels inference; blocking
+   jobs retain work permits until completion.
 
-## State, identity và refresh
+Action-review detection belongs to the Anthropic adapter: non-streaming, no tools,
+exact system prefix. Policy uses neutral RequestPurpose. Reviews retain transcript,
+schema and requested effort but omit session/cache identity and encrypted replay;
+response model identity remains the client's. Token count uses an injected estimator
+and does not apply review routing. Defaults live in config, not provider code.
 
-State: `$XDG_STATE_HOME/llm-proxy` hoặc `~/.local/state/llm-proxy`; override bằng
-`--state-dir`/`LLM_PROXY_STATE_DIR`. Thư mục `0700`, file `0600`, atomic replace + fsync.
+## Account lifecycle
 
-- `accounts.json`: insertion order, active/provider, quota/status/generation, login
-  sequence/tombstone. Identity gồm user + workspace. `credentials/<UUID>-<generation>.json`
-  publish trước registry; request đã lease giữ credential trong RAM.
-- `registry.lock`: cross-process read/modify/write, không giữ qua network await.
-  `locks/<UUID>.lock`: refresh single flight. Blocking I/O/locks dùng `spawn_blocking`.
-- Login ticket trước OAuth chặn completion cũ ghi đè/resurrect. Refresh/quota cũ không
-  sửa generation mới; quota đồng thời giữ reset dài nhất và NeedsLogin. Remove
-  unpublish trước xóa file; re-login publish bền vững rồi dọn generation cũ dưới lock.
-  Cleanup failure không rollback giả; log metadata/retry ở login sau.
-- `reasoning.key`: HMAC envelope chỉ replay khi account/generation/model khớp. Đổi
-  account giữ text/tool/result/summary, bỏ native state. Không `previous_response_id`
-  hoặc native compaction; Claude Code `/compact` tạo history portable.
-- Refresh đã dispatch là transaction riêng: giữ account lock qua parse/persistence,
-  tracked/bounded 64 slots, prune completed handles. Disconnect chỉ hủy inference;
-  graceful shutdown drain refresh. SIGKILL/disk failure/transport ambiguity vẫn có rủi ro.
+- Identity is user + workspace; selection is provider-scoped, sticky and insertion-ordered.
+- Login reserves a sequence before authentication. Credentials publish before registry;
+  generation checks/tombstones reject stale login, refresh and quota updates.
+- Remove unpublishes before deletion; re-login publishes before deleting old generations.
+  Existing leases retain credentials in memory; cleanup failure does not roll back login.
+- Registry locks cover atomic filesystem updates only. Account refresh locks span the
+  refresh transaction, which survives client cancellation and drains on shutdown.
+- Confirmed quota or definite credential rejection can switch accounts before output;
+  removed/changed accounts can reselect before dispatch. Never replay uncertain work
+  or events already emitted. Quota reset does not displace a healthy active account.
 
-## Routing, bounds và cancellation
+## Resource ownership
 
-Giữ active đến hard quota/definite credential rejection; account reset không giành
-lại active tốt. Chọn theo insertion order, tối đa 64 dispatch. Generic 429, model/
-permission, mạng/5xx không phải quota; cửa sổ quota phải cùng reset, thiếu reset dùng
-cooldown 60s. Removed/changed trước dispatch được reselect, không gộp storage errors.
-**Không replay sau message/content event hoặc khi không rõ upstream đã xử lý.**
-
-| Bound | Giá trị / ownership |
+| Resource | Bound |
 | --- | --- |
-| Admission | 32 permits chung generation/count, trước JSON; overload 503 |
-| Request/SSE/output-retained | 32 MiB / 8 MiB / 16 MiB, tính initial tool metadata |
-| Body upload/connect/upstream idle | 30s / 15s / 300s; SSE heartbeat 15s |
-| Blocking tokenizer | Budget riêng 32 jobs/provider; slot nằm trong closure |
+| Shared generation/count admission | 32; overload returns 503 |
+| Input / SSE frame / retained output | 32 / 8 / 16 MiB |
+| Upload / connect / upstream idle | 30 / 15 / 300 seconds |
+| SSE heartbeat | 15 seconds |
+| Tokenizer jobs / tracked refresh tasks | 32 / 64 |
+| Failover attempts / unknown-reset cooldown | 64 / 60 seconds |
 
-Buffered response giữ permit đến body drop/đọc xong; blocking storage/count jobs giữ
-permit đến khi job thật xong dù HTTP waiter cancel. Drop/disconnect hủy inference;
-preflight account dùng lại cho dispatch đầu, provider vẫn revalidate generation.
-Các bound không phải RAM cap: input/JSON/output copies có thể đồng thời rất lớn.
+Buffered bodies hold admission until consumed/dropped. Blocking closures hold permits
+independently of their HTTP waiter. Byte/concurrency limits are not a process RAM cap.
 
-## Logging và deployment
+State uses private atomic files and cross-process locks. Metadata logs use a 1024-record
+queue and three approximately 10 MiB JSONL files; overload drops records. Request IDs
+connect route, attempt and terminal events; upstream diagnostics are allowlisted.
 
-`logs/proxy.jsonl` + hai archives, khoảng 10 MiB/file; worker queue 1024, đầy thì bỏ
-record (không phải audit log). Chỉ proxy metadata, static error_code, native status
-và allowlisted parameter; không raw error/body, prompt, token, OAuth code, tool data,
-encrypted reasoning hay session ID. Health/models/list không tạo access log.
-
-Systemd quản lý foreground `serve` từ `~/.local/bin`, không daemon/PID riêng; config
-client thuộc `~/.claude/settings.json`, không phải server env. Cập nhật binary cần
-restart có chủ đích. User manager/WSL lifecycle áp dụng; không tự bật linger.
-
-Docker multi-stage → Debian slim, binary/CA/runtime libs/`LICENSE`, UID/GID 10001.
-Named volume mount `/var/lib/llm-proxy`, copy-up state con `0700`; không root chown
-entrypoint hay import host credentials. Native bind mặc định `127.0.0.1`; container
-explicit `0.0.0.0`, Compose publish **host loopback** vì listener không client auth.
-Device OAuth không cần callback port; `down -v` xóa state. SIGINT/grace 45s chứa
-OAuth timeout 30s + persistence. Build context allowlist; smoke dùng project/state
-synthetic/port riêng. Health ready=false khi chưa login không có nghĩa process hỏng.
+Systemd/Docker deliver SIGINT with a 45-second grace period for refresh persistence.
+Docker runs UID/GID 10001 with a named volume at `/var/lib/llm-proxy`; the image seeds
+its private `state/` child through volume copy-up. Host publication remains loopback.
