@@ -1,5 +1,8 @@
-# Ubuntu setup
+# Ubuntu / WSL setup
 
-Follow the [installation and update instructions](../README.md).
-Use either native Rust + systemd user or Docker Compose, then configure Claude Code.
-The README is the single source for setup commands.
+Use the English [installation guide](installation.md) for native Rust, optional
+systemd user service, or Docker Compose setup. It also covers account login,
+private state, loopback networking and offline verification.
+
+For an existing installation, follow [updating](updating.md). Client and model
+settings are documented in [configuration](configuration.md).

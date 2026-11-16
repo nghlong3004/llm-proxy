@@ -1,227 +1,110 @@
 # llm-proxy
 
-Proxy localhost cho phép **Claude Code dùng Codex hoặc Antigravity (`agy`) làm outbound**.
-Codex dùng tài khoản ChatGPT subscription; AGY dùng Google OAuth và Cloud Code Assist API.
-Hỗ trợ nhiều account theo từng provider; chỉ chuyển account khi lỗi cho phép failover an toàn.
-Claude Code vẫn thực thi tools, sửa file và chạy terminal; proxy không chạy agent loop.
+A local LLM gateway for coding agents, with model-based routing, native providers,
+and multi-account failover.
 
-```mermaid
-flowchart LR
-    Agent["Claude Code"] <-->|Anthropic Messages| Proxy["llm-proxy"]
-    Proxy <-->|Native provider API| Provider["Codex / Antigravity"]
-    Provider --> Model["LLM"]
-```
+English · [Tiếng Việt](docs/README.vi.md)
 
-## 1. Tải source
+## Overview
 
-Cần Git; trên Ubuntu/WSL có thể cài bằng `sudo apt-get install -y git`.
+Connect compatible coding agents to upstream providers through one local,
+Anthropic Messages-compatible endpoint. Configure where each model goes, sign in to
+provider accounts, and keep the coding agent's existing workflow.
+
+The gateway handles protocol translation, routing and account selection. **Your coding
+agent still owns tool execution, filesystem access, shell commands and the agent loop.**
+Claude Code is a documented client example, not the name of the inbound protocol or
+a claim that every coding agent is supported.
+
+## Features
+
+- **Explicit model routing:** map client aliases to canonical models and providers in TOML.
+- **Native provider adapters:** Codex and Antigravity (`agy`), without a Node sidecar.
+- **Provider-scoped accounts:** add multiple accounts without restarting the gateway.
+- **Conservative failover:** switch eligible accounts only for confirmed quota exhaustion,
+  definite credential rejection or a pre-dispatch account change. No cross-provider/model
+  fallback or replay after output or uncertain dispatch.
+- **Streaming and buffered responses:** one neutral event pipeline for both modes.
+- **Account visibility:** offline status, optional provider usage refresh, and explicit
+  banked-quota-reset workflows where supported.
+
+## Compatibility
+
+### Client API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /v1/messages` | Anthropic Messages-compatible generation |
+| `POST /v1/messages/count_tokens` | Local token estimate; not a provider-authoritative count |
+| `GET /v1/models` | Configured model/alias catalog; not an entitlement check |
+| `GET /health` | Process status and account readiness |
+
+Clients must support a configurable API base URL and the implemented Messages subset.
+Other inbound protocols, including the OpenAI Chat Completions API, are not implemented.
+
+### Providers
+
+| Provider | Sign-in | Important limits |
+| --- | --- | --- |
+| Codex (`codex`) | ChatGPT browser OAuth or device code | Model access and account-service capabilities depend on the account/backend. |
+| Antigravity (`agy`) | Google browser OAuth | Claude text/images/function tools; Gemini text/images only. No explicit reasoning effort, structured output, hosted search, compaction, forced tool choice, live usage or banked resets. |
+
+AGY rejects unsupported controls rather than silently dropping them. In particular,
+clients that automatically send reasoning effort cannot use that request unchanged
+with AGY. Its browser callback is not published by the shipped Docker configuration.
+See the [AGY reference and limitations](docs/antigravity.md).
+
+## Installation
+
+Build from source with **Rust 1.100.0**. Ubuntu/WSL prerequisites, native installation,
+optional systemd setup and Docker instructions are in the
+[installation guide](docs/installation.md).
+
+For an interactive native run after installing the prerequisites:
 
 ```sh
 git clone https://github.com/nghlong3004/llm-proxy.git
 cd llm-proxy
-```
-
-Chọn **một** cách chạy dưới đây.
-
-## 2A. Cài native trên Ubuntu / WSL
-
-```sh
-sudo apt-get update
-sudo apt-get install -y build-essential pkg-config cmake curl ca-certificates
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.100.0
-. "$HOME/.cargo/env"
 cargo install --path . --locked --root "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Binary được cài tại `~/.local/bin/llm-proxy`. Thêm dòng PATH trên vào `~/.bashrc`
-hoặc `~/.zshrc` để dùng ở terminal mới.
+## Usage / quick start
 
-Đăng nhập và chạy nền:
+Sign in to a Codex account, then start the local server:
 
 ```sh
 llm-proxy accounts add codex --name personal --login-method device-code
-install -D -m 644 packaging/systemd/llm-proxy.service ~/.config/systemd/user/llm-proxy.service
-systemctl --user daemon-reload
-systemctl --user enable --now llm-proxy
+llm-proxy serve --default-model gpt-6.1-sol
+```
+
+Follow the sign-in instructions. The model above is an example: choose one your
+account can access. Device login may need to be enabled in ChatGPT settings.
+
+In another terminal:
+
+```sh
 curl --fail http://127.0.0.1:18765/health
+llm-proxy accounts status
 ```
 
-Mở URL được in ra và nhập device code. Thêm account bằng cách lặp lệnh login với
-`--name` khác. Nếu không dùng systemd, chạy `llm-proxy serve --default-model gpt-6.1-sol`.
+Check `ready` in the health response; HTTP 200 alone does not establish model access
+or upstream availability. Then point a compatible client at
+`http://127.0.0.1:18765`. See the
+[client configuration example](docs/configuration.md#client-configuration-example).
 
-## 2B. Chạy Docker
+For native AGY sign-in, use `llm-proxy accounts add agy --name google-personal` and
+configure an AGY model route before serving. OAuth client configuration is acquired
+lazily from an integrity-pinned public reference; no client environment pair is
+required by default. Review [its trust boundary](docs/antigravity.md#provenance) first.
 
-Cần Docker Engine và Docker Compose; không cần Rust trên host. Dockerfile build
-binary ở build stage; Compose chạy container và lưu state trong named volume.
+## Configuration
 
-```sh
-docker compose up -d --build
-docker compose exec proxy llm-proxy accounts add codex --name personal --login-method device-code
-curl --fail http://127.0.0.1:18765/health
-```
+Configuration lives in `<state-dir>/config.toml`; the native default is
+`$XDG_STATE_HOME/llm-proxy` or `~/.local/state/llm-proxy`. Use the same state directory
+for login, account commands and the server.
 
-Nếu cổng đã được dùng, chạy `LLM_PROXY_PORT=18766 docker compose up -d --build`
-và dùng cùng giá trị ở các lần `up` sau.
-
-```sh
-docker compose logs -f proxy
-docker compose stop
-docker compose start
-docker compose down
-```
-
-`down` giữ account; **`down -v` xóa account và credential**. Cổng chỉ publish ra
-localhost; không expose public vì API chưa xác thực client.
-
-## 3. Cấu hình Claude Code
-
-Nếu chưa cài:
-
-```sh
-curl -fsSL https://claude.ai/install.sh | bash
-```
-
-Gộp các key sau vào `env` của `~/.claude/settings.json`; giữ nguyên những key đã có:
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:18765",
-    "ANTHROPIC_AUTH_TOKEN": "local",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
-    "CLAUDE_CODE_AUTO_MODE_SERVER": "0"
-  }
-}
-```
-
-Nếu đổi host port, sửa `ANTHROPIC_BASE_URL` tương ứng. Mở terminal/phiên mới, vào
-project cần làm và chạy:
-
-```sh
-claude
-```
-
-Chọn Auto mode bằng `Shift+Tab` khi cần. Biến `CLAUDE_CODE_AUTO_MODE_SERVER=0`
-dùng classifier phía client, không bỏ kiểm tra quyền.
-
-## 4. Account và config
-
-Native:
-
-```sh
-llm-proxy accounts status                         # cache offline, tất cả provider có account
-llm-proxy accounts status codex                   # lọc đúng provider
-llm-proxy accounts status codex --refresh         # chủ động gọi provider để cập nhật
-llm-proxy accounts status --output-format json    # dữ liệu status công khai, không credential
-llm-proxy accounts reset-quota codex ACCOUNT_ID   # chỉ xem trước, chưa tiêu reset
-llm-proxy accounts reset-quota codex ACCOUNT_ID --yes
-llm-proxy accounts remove ACCOUNT_ID
-```
-
-`accounts status` mặc định chỉ đọc cache: không cần model/config hợp lệ, credential hay mạng.
-Dấu `* active` thuộc từng provider. Usage ghi rõ nguồn và tuổi quan sát; cache có thể
-đã cũ. Nếu `--refresh` lỗi, dữ liệu cache vẫn được in riêng với lỗi và lệnh trả mã
-khác 0. `unknown` là chưa biết, `unsupported` là không hỗ trợ; cả hai **không phải 0**.
-Cửa sổ quota, thời lượng và thời điểm reset do provider định nghĩa, không mặc định
-provider nào cũng có quota 5 giờ/tuần.
-
-Nếu anh dùng lượt reset bên Codex CLI, chạy `llm-proxy accounts status codex --refresh`
-để proxy nhận quota đã phục hồi. Khi Codex xác nhận `allowed=true`, lệnh gỡ cờ
-hết quota local cho đúng account/generation và hiện trạng thái mới ngay. Nó không
-đổi account đang active, không gỡ lỗi cần đăng nhập lại và không tự tiêu lượt reset.
-Dữ liệu thiếu, lỗi cập nhật hoặc `%` quota đơn thuần không đủ để gỡ cờ. Không có
-polling nền; lệnh `status` không có `--refresh` vẫn chỉ đọc cache.
-
-Phân biệt ba loại thông tin:
-
-- **Scheduled reset**: thời điểm quota cửa sổ tự phục hồi, không phải thao tác mua thêm.
-- **Prepaid credits**: số dư trả trước, trạng thái unlimited/spend-blocked nếu được cung cấp;
-  không phải số lần reset quota.
-- **BANKED resets**: quyền reset đã tích lũy, có số lượng và hạn dùng nếu provider cung cấp.
-  `reset-quota --yes` yêu cầu tiêu một quyền này; không mua credits và không chỉ đợi lịch reset.
-  Không có `--yes` thì chỉ xem trước. Khả năng đọc live/reset tùy provider; provider tương lai
-  có thể chỉ hỗ trợ một phần, dữ liệu thiếu không được tự suy thành 0.
-
-Nếu timeout sau khi gửi reset, kết quả có thể **chưa xác định** và reset có thể đã bị tiêu.
-Giữ request ID được in ra; không tạo yêu cầu mới. Chỉ khi chủ động muốn đối soát/thử lại
-cùng yêu cầu, dùng đúng ID đó:
-
-```sh
-llm-proxy accounts reset-quota codex ACCOUNT_ID --yes --retry REQUEST_ID
-```
-
-Proxy không tự thử lại mutation; thời gian provider lưu idempotency **không được bảo đảm**.
-Lệnh in outcome chính xác, request ID và lỗi đối soát/cập nhật sau reset nếu có.
-
-Tất cả thao tác account dùng nhóm `accounts`: `add <provider>`, `status [provider]`,
-`reset-quota <provider> ACCOUNT_ID`, và `remove ACCOUNT_ID_OR_PREFIX`.
-`remove` nhận UUID đầy đủ hoặc prefix từ **8 ký tự**, chỉ xóa khi khớp duy nhất;
-khớp nhiều account thì phải nhập dài hơn. `reset-quota` vẫn cần UUID đầy đủ.
-
-Tương thích lệnh cũ: `accounts login --name personal --login-method device-code`
-vẫn đăng nhập Codex; `accounts list` và JSON của nó giữ định dạng cũ. Các lệnh
-cấp đầu `login`, `status`, `reset-quota` vẫn hoạt động nhưng ẩn khỏi help chính.
-`accounts add` bắt buộc có provider (`codex` hoặc `agy`).
-
-Docker: thêm `docker compose exec proxy` trước các lệnh trên.
-
-Config native nằm tại `~/.local/state/llm-proxy/config.toml` (hoặc
-`$XDG_STATE_HOME/llm-proxy/config.toml`); Docker tại `/var/lib/llm-proxy/state/config.toml`.
-Dùng [config.example.toml](config.example.toml) khi cần đổi model hoặc alias.
-Thay config cần restart proxy; thêm/xóa account không cần restart.
-
-## Antigravity (`agy`)
-
-Adapter Rust native, **không cần chạy thêm proxy Node và không cần đặt OAuth client env**:
-
-```sh
-llm-proxy accounts add agy --name google-personal
-llm-proxy accounts status agy
-```
-
-Lần login/refresh đầu tiên cần mạng tới `raw.githubusercontent.com` để lấy cấu hình
-OAuth client công khai từ **commit đã ghim** của repo tham khảo. Proxy kiểm tra SHA-256
-trước khi chỉ trích hai trường client; không chạy JavaScript hay lấy endpoints/prompt
-của file đó. Không nhúng hoặc mã hóa giấu cặp client trong source/tests.
-
-Cache nằm tại `<state-dir>/agy-oauth-client/7c672fdc6fa62fcd50e8f75df5644dad6a63c2dc/reference.txt`
-(thư mục `0700`, file `0600`), được dùng lại cho refresh ở cùng state directory.
-Cache hỏng/sai hash sẽ báo lỗi trước OAuth, không tự bỏ qua integrity hay đổi pin.
-Status offline và startup chỉ dùng Codex không tải file này.
-
-Nếu chủ động override, cung cấp **cả** `LLM_PROXY_AGY_CLIENT_ID` và
-`LLM_PROXY_AGY_CLIENT_SECRET` cho tiến trình login/serve; chỉ có một biến hoặc giá trị
-rỗng sẽ báo lỗi, không trộn với bản tham khảo. Không đặt chúng trong TOML/repo hay
-`~/.claude/settings.json`. Client vẫn phải được Google/AGY chấp nhận; cấu hình công
-khai hoặc client tự tạo không bảo đảm entitlement. Xem nguồn/hash trong
-[provenance](docs/antigravity.md).
-
-Mở URL được in ra, đăng nhập Google và cho phép callback về
-`http://localhost:51121/oauth-callback`. Không có device-code login hay import credential
-của ứng dụng Antigravity. Proxy lưu token riêng trong state private; identity gồm user ID
-và project được Google trả về. Login có thể onboard project khi tài khoản chưa có;
-không tự chọn project ID giả. Nếu callback không tới WSL, cần cấu hình localhost forwarding;
-không mở callback ra wildcard/public. Login bên trong Docker chưa được hỗ trợ bởi cấu hình
-publication hiện tại; không publish callback lên mạng để khắc phục.
-
-Ví dụ gộp vào `config.toml` để dùng AGY cho hội thoại, vẫn dùng Codex cho classifier:
-
-```toml
-default_provider = "agy"
-default_model = "claude-sonnet-4-6"
-
-[auto_review]
-provider = "codex"
-model = "gpt-6-luna"
-```
-
-Classifier này cần account Codex riêng. AGY chưa hỗ trợ structured-output requests,
-nên không dùng AGY làm classifier Auto mode; lỗi classifier luôn trả lỗi, không tự duyệt.
-Giữ `CLAUDE_CODE_AUTO_MODE_SERVER=0` trên client nếu dùng client classifier.
-
-Hoặc giữ default Codex, chỉ chuyển một alias sang AGY:
+Example mixed-provider routing:
 
 ```toml
 default_provider = "codex"
@@ -234,53 +117,66 @@ sonnet = "claude-sonnet-4-6"
 provider = "agy"
 ```
 
-Model ID phải là ID canonical do AGY phục vụ. `claude-sonnet-4-6` và
-`claude-opus-4-6-thinking` là ví dụ từ source tham khảo, **không phải bảo đảm entitlement**;
-proxy không ngầm đổi model mới thành model cũ. Đăng ký model khác qua `[models."ID"]`.
-Route theo thứ tự: `auto_review.provider` tường minh → policy của model hiệu lực →
-`default_provider`. Không failover xuyên provider hoặc đổi model khi gặp lỗi.
+Here `sonnet` routes to the registered AGY model. Unmapped generic Claude-family
+aliases use `default_model`; explicit native model registrations take precedence.
+The gateway does not silently substitute a different provider or model on failure.
+These IDs are examples, not guarantees of backend availability.
 
-Bản đầu hỗ trợ text, ảnh base64, function tools/tool results trên Claude, SSE và buffered
-response từ cùng stream, cùng thought-signature replay có kiểm tra account/generation/model.
-Gemini hiện chỉ hỗ trợ text/ảnh; function tools của Gemini, hosted search, compaction,
-structured output và forced tool choice chưa hỗ trợ sẽ trả lỗi trước dispatch.
-Schema tools có constraint phong phú được giữ nguyên qua `parametersJsonSchema` thay vì
-bị bỏ constraint; khả năng chấp nhận trường này trên API nội bộ chưa được kiểm live.
-AGY chưa có mapping reasoning effort đã xác minh: nếu gửi `output_config.effort` hoặc
-`reasoning_effort` explicit (`none`, `low`, `medium`, `high`, `xhigh`, `max`), request sẽ
-trả lỗi `unsupported_reasoning_effort` trước chọn account/gọi provider, không âm thầm bỏ qua.
-Bỏ hẳn effort thì giữ policy hiện tại: Claude `-thinking` dùng `agy_thinking_budget`,
-model khác không tự thêm thinking budget. Client tự gửi effort sẽ cần bỏ trường đó hoặc
-chọn route Codex; proxy không tự đổi model/provider để né lỗi.
-Token count vẫn là ước lượng local, không phải tokenizer/quota chính thức của Google.
+See [configuration and accounts](docs/configuration.md) and
+[config.example.toml](config.example.toml) for state selection, client setup,
+classifier routing, account status and quota-reset recovery. Restart the server after
+editing config; adding or removing accounts does not require a restart.
 
-`accounts status agy` chỉ đọc metadata offline. Usage live và banked quota reset của AGY
-hiện báo `unsupported`, không bịa số 0. Generic 429/`RESOURCE_EXHAUSTED`, lỗi capacity,
-permission/model, mạng hoặc 5xx không đủ để đánh dấu account hết quota hay replay request.
+## Updating
 
-Đây là API nội bộ, có thể đổi hoặc giới hạn tài khoản; cần tự kiểm tra điều khoản và quyền
-sử dụng dịch vụ. Tích hợp mới chỉ được kiểm bằng mock/local, **chưa xác minh live**.
-Xem [provenance và giới hạn](docs/antigravity.md).
+Use the [update guide](docs/updating.md) for native, systemd and Docker deployments,
+including backups, restart checks and rollback. Reuse the same state directory or
+Docker volume to preserve accounts; a binary update alone does not require re-login.
 
-## 5. Cập nhật phiên bản mới
+## Documentation
 
-Trong thư mục source đã clone:
+- [Installation](docs/installation.md) — native, systemd and Docker.
+- [Configuration and accounts](docs/configuration.md) — routing, clients and quota workflows.
+- [Updating](docs/updating.md) — upgrades, backups and rollback.
+- [Antigravity](docs/antigravity.md) — OAuth source, capabilities, provenance and caveats.
+- [Architecture](docs/architecture.md) — boundaries, request lifecycle and resource ownership.
+- [Development conventions](docs/conventions.md) — commands, style and reference provenance.
 
-**Native:**
+For help, include the version/revision, deployment method and a **redacted** error in
+[an issue](https://github.com/nghlong3004/llm-proxy/issues). Never attach credentials,
+OAuth codes, prompts or tool payloads.
+
+## Security and limitations
+
+- **Local-only listener:** no client authentication. Keep native listeners and Docker
+  host publication on loopback. A client's placeholder auth token does not secure the API.
+- **Sensitive state:** directories use `0700` and files use `0600` on Unix. Account
+  credentials are not encrypted at rest; protect the state directory and its backups.
+- **Private/internal upstream APIs:** behavior, OAuth client acceptance and account
+  entitlement can change. Check provider terms and permissions; this project is not
+  affiliated with or endorsed by the providers.
+- **Verification boundary:** automated coverage uses synthetic/local contracts, not
+  authenticated live provider validation or a guarantee of model safety.
+- **Classifier errors stay errors:** unsupported requests and classifier failures never
+  become fabricated approvals. Configure a supported review route when needed.
+
+## Development / contributing
+
+Use the pinned Rust toolchain and keep `Cargo.lock`. Before proposing changes:
 
 ```sh
-git pull --ff-only
-cargo install --path . --locked --force --root "$HOME/.local"
-install -D -m 644 packaging/systemd/llm-proxy.service ~/.config/systemd/user/llm-proxy.service
-systemctl --user daemon-reload
-systemctl --user restart llm-proxy
+cargo fmt --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --locked -- --include-ignored
+cargo build --release --locked
 ```
 
-**Docker:**
+Some ignored tests require localhost sockets; they use disposable synthetic state,
+not real accounts. See [conventions](docs/conventions.md) for Docker and additional
+smoke checks. Keep changes focused, add regression coverage, and do not include
+credentials or real request payloads in issues, fixtures or commits.
 
-```sh
-git pull --ff-only
-docker compose up -d --build
-```
+## License
 
-Account được giữ lại; không cần login lại chỉ vì cập nhật binary/image.
+[MIT](LICENSE), including the attribution notices for referenced/ported work.
+Provider access and service terms are separate from this software license.
