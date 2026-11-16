@@ -49,6 +49,85 @@ there is no branch-head update, redirect following or integrity bypass. The clie
 must still be authorized/accepted by the service; this public reference and arbitrary
 Google OAuth app registration do not establish Antigravity entitlement.
 
+## Login project protocol
+
+Project discovery/onboarding additionally follows
+[NoeFabris/opencode-antigravity-auth](https://github.com/NoeFabris/opencode-antigravity-auth/tree/821f824440b2b7c9ffe96bbdfad9d5cdead2f1de),
+pinned to `821f824440b2b7c9ffe96bbdfad9d5cdead2f1de` (MIT, copyright (c) 2025 Jens;
+attribution retained in [LICENSE](../LICENSE)):
+
+- [`src/antigravity/oauth.ts`](https://github.com/NoeFabris/opencode-antigravity-auth/blob/821f824440b2b7c9ffe96bbdfad9d5cdead2f1de/src/antigravity/oauth.ts):
+  `loadManagedProject` discovery contract.
+- [`src/plugin/project.ts`](https://github.com/NoeFabris/opencode-antigravity-auth/blob/821f824440b2b7c9ffe96bbdfad9d5cdead2f1de/src/plugin/project.ts):
+  discovery/onboarding metadata, tier selection, response shapes and pending polling.
+- [`src/constants.ts`](https://github.com/NoeFabris/opencode-antigravity-auth/blob/821f824440b2b7c9ffe96bbdfad9d5cdead2f1de/src/constants.ts):
+  daily endpoint, fallback version/changelist and endpoint-specific User-Agents.
+
+The llm-proxy baseline `7c652b2cbd2a74557faa238648ef1df0c4219e21` instead used
+production Cloud Code for login, numeric metadata and `tierId`. These request-contract
+differences are corrected, but are not proof of the cause of any particular account's
+missing-project response. No authenticated response has been captured or inspected.
+
+| Operation | Contract |
+| --- | --- |
+| Discovery | `POST https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`; `{"metadata":{"ideType":"ANTIGRAVITY"}}`; 10-second request timeout |
+| Onboarding | `POST https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser`; `{"tier_id":"<selected-tier>","metadata":{"ide_type":"ANTIGRAVITY","ide_version":"2.24.0","ide_name":"antigravity"}}`; 30-second request timeout |
+
+Both send Bearer authorization and JSON content type. Discovery uses exactly
+`antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)`.
+Onboarding appends ` google-api-nodejs-client/10.3.0` to that User-Agent and adds
+`Accept: */*` and `X-Goog-Api-Client: gl-node/22.21.1`. Discovery does **not** use
+onboarding's Node client suffix or `X-Goog-Api-Client`. Neither sends numeric platform,
+plugin metadata or `mode`. The fixed platform text follows the pinned wire reference,
+not host detection. llm-proxy pins the reference's fallback version/changelist rather
+than introducing its dynamic version lookup; future service acceptance is unverified.
+Token/userinfo headers and verified OAuth-client acquisition retain the existing
+implementation; this change does not copy the reference's separate OAuth User-Agent.
+
+Tier selection is first default allowed tier with a usable ID → first allowed entry's
+usable ID → `currentTier.id` → `free-tier`. IDs are strings, trimmed and required to be
+nonempty (stricter than JavaScript truthiness). Project values likewise accept only a
+nonempty trimmed string or object with such an `id`.
+
+Onboarding remains an explicit-login mutation. Only successful, valid pending
+responses (false/absent `done`) permit another onboarding POST: at most 10 total,
+5 seconds between requests. HTTP failures, top-level provider errors, malformed
+responses and transport/read failures stop immediately; uncertain mutations are not
+replayed. These bounds follow the reference; there is no operation-name GET contract.
+
+**Intentional robustness improvement:** `done: true` without a usable project triggers
+at most three read-only discovery requests, immediately then at 5-second intervals.
+Discovery errors stop the recheck; no recheck ever restarts onboarding. This assumes
+provisioning may become visible after operation completion, but that behavior has not
+been confirmed live. The reference does not do this recheck. Unlike its permissive
+OAuth flow and later hardcoded project fallback, llm-proxy requires an actual managed
+project before login succeeds or account credentials are published. Inference and
+background refresh never discover or onboard projects. Codex is unchanged.
+
+Sanitized diagnostics accompany project-operation CLI errors and tracing events:
+operation, endpoint host (no URL path/query), HTTP status or `unavailable`, selected
+tier, done state and project/ID field presence/type. Only `free-tier`/`standard-tier`
+are printed verbatim; other tier values are `other`, preventing provider-supplied
+identifiers/secrets from leaking. Values of project fields, operation names returned
+by Google, account/user identifiers, credentials, OAuth codes and complete bodies are
+never printed. Missing project, onboarding timeout, provider/HTTP rejection, malformed
+response, body limit and transport failure remain distinct errors. Synthetic localhost
+tests validate these contracts and persistence failure behavior, not entitlement or
+successful provisioning of a real account.
+
+Rebuild and explicitly retry using the same proxy state directory and account name
+as the original login (replace the two placeholders):
+
+```sh
+cargo build --release --locked
+./target/release/llm-proxy --state-dir '/path/to/existing/state' accounts add agy --name 'ACCOUNT_NAME'
+```
+
+This runs the local build directly; it does not install it or change running services.
+If login still fails, share only the sanitized project-operation error chain, not the
+browser authorization URL, callback URL, account state files or raw provider responses.
+A successful synthetic check or release build does not establish live provisioning.
+
 ## Integration policy
 
 - Provider key: `agy`. The default base is the daily Cloud Code Assist service;

@@ -1,4 +1,5 @@
-//! Native AGY Google OAuth, pinned to upstream 7c672fdc6fa62fcd50e8f75df5644dad6a63c2dc.
+//! Native AGY Google OAuth. Project protocol: opencode-antigravity-auth
+//! 821f824440b2b7c9ffe96bbdfad9d5cdead2f1de; see docs/antigravity.md.
 //! Client configuration is acquired lazily from a verified public reference or explicit overrides.
 use super::{
     agy_client::ClientSource,
@@ -10,6 +11,7 @@ use crate::accounts::{Credential, now};
 use anyhow::{Context, Result, bail};
 use axum::{Router, routing::get};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -25,6 +27,128 @@ const SCOPES: &str = concat!(
     "https://www.googleapis.com/auth/cclog ",
     "https://www.googleapis.com/auth/experimentsandconfigs"
 );
+
+const PROJECT_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
+const ANTIGRAVITY_VERSION: &str = "2.24.0";
+const DISCOVERY_USER_AGENT: &str =
+    "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)";
+const ONBOARD_USER_AGENT: &str = concat!(
+    "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682) ",
+    "google-api-nodejs-client/10.3.0"
+);
+const ONBOARD_ATTEMPTS: usize = 10;
+const PROJECT_RECHECKS: usize = 3;
+const PROJECT_POLL_DELAY: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy)]
+enum ProjectOperation {
+    Load,
+    Onboard,
+}
+
+impl ProjectOperation {
+    fn method(self) -> &'static str {
+        match self {
+            Self::Load => "loadCodeAssist",
+            Self::Onboard => "onboardUser",
+        }
+    }
+
+    fn timeout(self) -> Duration {
+        Duration::from_secs(match self {
+            Self::Load => 10,
+            Self::Onboard => 30,
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ProjectError {
+    #[error("AGY project transport failure; login not completed")]
+    Transport,
+    #[error("AGY project request failed (HTTP {0}); login not completed")]
+    Http(u16),
+    #[error("Malformed AGY project response; login not completed")]
+    Malformed,
+    #[error("AGY project response exceeds size limit; login not completed")]
+    TooLarge,
+    #[error("AGY project operation returned a provider error; login not completed")]
+    Provider,
+    #[error(
+        "AGY onboarding did not identify a managed project after bounded discovery recheck; login not completed"
+    )]
+    MissingProject,
+    #[error("AGY project onboarding timed out; login not completed")]
+    OnboardingTimeout,
+}
+
+// Only allowlisted metadata reaches tracing or CLI error chains, never response values.
+#[derive(Debug)]
+struct ProjectDiagnostics {
+    operation: &'static str,
+    host: String,
+    status: Option<u16>,
+    tier: &'static str,
+    done: &'static str,
+    project_type: &'static str,
+    project_id_type: &'static str,
+}
+
+impl std::fmt::Display for ProjectDiagnostics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "AGY operation={} host={} status={} selected_tier={} done={} project_field={} project_id_field={}",
+            self.operation,
+            self.host,
+            self.status
+                .map_or_else(|| "unavailable".into(), |status| status.to_string()),
+            self.tier,
+            self.done,
+            self.project_type,
+            self.project_id_type,
+        )
+    }
+}
+
+impl ProjectDiagnostics {
+    fn observe(&mut self, operation: ProjectOperation, body: &Value) {
+        self.done = match body.get("done") {
+            None => "absent",
+            Some(Value::Bool(true)) => "true",
+            Some(Value::Bool(false)) => "false",
+            Some(_) => "invalid",
+        };
+        let project = match operation {
+            ProjectOperation::Load => body.get("cloudaicompanionProject"),
+            ProjectOperation::Onboard => body.pointer("/response/cloudaicompanionProject"),
+        };
+        self.project_type = field_type(project);
+        self.project_id_type = field_type(project.and_then(|project| project.get("id")));
+    }
+}
+
+fn field_type(value: Option<&Value>) -> &'static str {
+    match value {
+        None => "absent",
+        Some(Value::Null) => "null",
+        Some(Value::Bool(_)) => "boolean",
+        Some(Value::Number(_)) => "number",
+        Some(Value::String(_)) => "string",
+        Some(Value::Array(_)) => "array",
+        Some(Value::Object(_)) => "object",
+    }
+}
+
+fn diagnostic_tier(tier: Option<&str>) -> &'static str {
+    // Unknown provider strings can contain identifiers or secrets, not just tier names.
+    match tier {
+        None => "not-selected",
+        Some("free-tier") => "free-tier",
+        Some("standard-tier") => "standard-tier",
+        Some(_) => "other",
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct AgyEndpoints {
@@ -45,7 +169,7 @@ impl AuthClient {
         Self::with_agy_source(
             "https://oauth2.googleapis.com/token".into(),
             "https://www.googleapis.com/oauth2/v1/userinfo".into(),
-            "https://cloudcode-pa.googleapis.com".into(),
+            PROJECT_ENDPOINT.into(),
             ClientSource::from_environment(root.to_owned()),
         )
     }
@@ -245,78 +369,151 @@ impl AuthClient {
         agy_credential_from_tokens(tokens, &identity.id, &project, None)
     }
 
-    async fn agy_project_request(&self, access: &str, method: &str, body: &Value) -> Result<Value> {
+    async fn agy_project_request(
+        &self,
+        access: &str,
+        operation: ProjectOperation,
+        body: &Value,
+        tier: Option<&str>,
+    ) -> Result<(Value, ProjectDiagnostics)> {
         let endpoints = self.agy_endpoints()?;
-        let response = self
+        let method = operation.method();
+        let mut diagnostics = ProjectDiagnostics {
+            operation: method,
+            host: url::Url::parse(&endpoints.project)?
+                .host_str()
+                .unwrap_or("unknown")
+                .to_owned(),
+            status: None,
+            tier: diagnostic_tier(tier),
+            done: "unavailable",
+            project_type: "unavailable",
+            project_id_type: "unavailable",
+        };
+        let mut request = self
             .client
             .post(format!("{}/v1internal:{method}", endpoints.project))
+            .timeout(operation.timeout())
             .bearer_auth(access)
-            .json(body)
-            .send()
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("AGY project discovery network error; login not completed")
-            })?;
-        require_success(&response, "AGY project discovery")?;
-        read_json(response).await
+            .json(body);
+        request = match operation {
+            ProjectOperation::Load => request.header("User-Agent", DISCOVERY_USER_AGENT),
+            ProjectOperation::Onboard => request
+                .header("User-Agent", ONBOARD_USER_AGENT)
+                .header("Accept", "*/*")
+                .header("X-Goog-Api-Client", "gl-node/22.21.1"),
+        };
+        let result = async {
+            let response = request.send().await.map_err(|_| ProjectError::Transport)?;
+            diagnostics.status = Some(response.status().as_u16());
+            if !response.status().is_success() {
+                return Err(ProjectError::Http(response.status().as_u16()));
+            }
+            let mut bytes = Vec::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|_| ProjectError::Transport)?;
+                if bytes.len().saturating_add(chunk.len()) > 512 * 1024 {
+                    return Err(ProjectError::TooLarge);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let value: Value =
+                serde_json::from_slice(&bytes).map_err(|_| ProjectError::Malformed)?;
+            diagnostics.observe(operation, &value);
+            if !value.is_object() {
+                return Err(ProjectError::Malformed);
+            }
+            if value.get("error").is_some() {
+                return Err(ProjectError::Provider);
+            }
+            if matches!(operation, ProjectOperation::Onboard)
+                && value.get("done").is_some_and(|done| !done.is_boolean())
+            {
+                return Err(ProjectError::Malformed);
+            }
+            Ok(value)
+        }
+        .await;
+        tracing::info!(event = "agy_project_response", diagnostics = %diagnostics);
+        match result {
+            Ok(value) => Ok((value, diagnostics)),
+            Err(error) => Err(anyhow::Error::new(error).context(diagnostics.to_string())),
+        }
+    }
+
+    async fn agy_load_project(
+        &self,
+        access: &str,
+        tier: Option<&str>,
+    ) -> Result<(Value, ProjectDiagnostics)> {
+        self.agy_project_request(
+            access,
+            ProjectOperation::Load,
+            &json!({"metadata": {"ideType": "ANTIGRAVITY"}}),
+            tier,
+        )
+        .await
     }
 
     async fn agy_discover_project(&self, access: &str) -> Result<String> {
-        let metadata = client_metadata();
-        let loaded = self
-            .agy_project_request(
-                access,
-                "loadCodeAssist",
-                &json!({"metadata": metadata, "mode": 1}),
-            )
-            .await?;
-        if !loaded.is_object() || loaded.get("error").is_some() {
-            bail!("Invalid AGY project discovery response; login not completed");
-        }
+        let (loaded, _) = self.agy_load_project(access, None).await?;
         if let Some(project) = project_id(loaded.get("cloudaicompanionProject")) {
             return Ok(project.to_owned());
         }
-        let tiers = loaded.get("allowedTiers").and_then(Value::as_array);
-        let tier = tiers
-            .and_then(|tiers| {
-                tiers
-                    .iter()
-                    .find(|tier| tier.get("isDefault").and_then(Value::as_bool) == Some(true))
-                    .or_else(|| tiers.first())
-            })
-            .and_then(|tier| tier.get("id"))
-            .and_then(Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-            .unwrap_or("free-tier");
-        let body = json!({"tierId": tier, "metadata": metadata});
-        // Poll only confirmed not-done responses. Never retry a transport error or
-        // unsuccessful HTTP response: dispatch may already have changed the account.
-        for attempt in 0..10 {
-            let onboarded = self
-                .agy_project_request(access, "onboardUser", &body)
-                .await?;
-            if !onboarded.is_object() || onboarded.get("error").is_some() {
-                bail!("Invalid AGY onboarding response; login not completed");
+        let tier = selected_tier(&loaded);
+        let body = json!({
+            "tier_id": tier,
+            "metadata": {
+                "ide_type": "ANTIGRAVITY",
+                "ide_version": ANTIGRAVITY_VERSION,
+                "ide_name": "antigravity"
             }
+        });
+        // This protocol polls via the same POST, but only after confirmed pending
+        // responses. Dispatch failures must never replay this mutation.
+        for attempt in 0..ONBOARD_ATTEMPTS {
+            let (onboarded, diagnostics) = self
+                .agy_project_request(access, ProjectOperation::Onboard, &body, Some(tier))
+                .await?;
             if onboarded.get("done").and_then(Value::as_bool) == Some(true) {
-                return project_id(onboarded.pointer("/response/cloudaicompanionProject"))
-                    .map(str::to_owned)
-                    .context(
-                        "AGY onboarding did not identify a managed project; login not completed",
-                    );
+                if let Some(project) =
+                    project_id(onboarded.pointer("/response/cloudaicompanionProject"))
+                {
+                    return Ok(project.to_owned());
+                }
+                // A completed operation may precede discovery visibility. This is
+                // a bounded, read-only robustness improvement, not upstream behavior.
+                return self
+                    .agy_recheck_project(access, tier)
+                    .await
+                    .context(diagnostics.to_string());
             }
             // Google long-running operations may omit the default false `done`.
-            if onboarded
-                .get("done")
-                .is_some_and(|done| done.as_bool() != Some(false))
-            {
-                bail!("Invalid AGY onboarding response; login not completed");
+            if attempt + 1 == ONBOARD_ATTEMPTS {
+                return Err(anyhow::Error::new(ProjectError::OnboardingTimeout)
+                    .context(diagnostics.to_string()));
             }
-            if attempt < 9 {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(PROJECT_POLL_DELAY).await;
+        }
+        Err(ProjectError::OnboardingTimeout.into())
+    }
+
+    async fn agy_recheck_project(&self, access: &str, tier: &str) -> Result<String> {
+        for attempt in 0..PROJECT_RECHECKS {
+            if attempt > 0 {
+                tokio::time::sleep(PROJECT_POLL_DELAY).await;
+            }
+            let (loaded, diagnostics) = self.agy_load_project(access, Some(tier)).await?;
+            if let Some(project) = project_id(loaded.get("cloudaicompanionProject")) {
+                return Ok(project.to_owned());
+            }
+            if attempt + 1 == PROJECT_RECHECKS {
+                return Err(anyhow::Error::new(ProjectError::MissingProject)
+                    .context(diagnostics.to_string()));
             }
         }
-        bail!("AGY project onboarding timed out; login not completed")
+        Err(ProjectError::MissingProject.into())
     }
 }
 
@@ -337,17 +534,31 @@ fn authorization_url(verifier: &str, state: &str, client_id: &str) -> Result<url
     Ok(url)
 }
 
-fn client_metadata() -> Value {
-    let platform = if cfg!(target_arch = "aarch64") { 4 } else { 3 };
-    json!({"ideType": 9, "platform": platform, "pluginType": 2})
+fn selected_tier(loaded: &Value) -> &str {
+    let tiers = loaded.get("allowedTiers").and_then(Value::as_array);
+    tiers
+        .and_then(|tiers| {
+            tiers
+                .iter()
+                .filter(|tier| tier.get("isDefault").and_then(Value::as_bool) == Some(true))
+                .find_map(|tier| nonempty_string(tier.get("id")))
+                .or_else(|| {
+                    tiers
+                        .first()
+                        .and_then(|tier| nonempty_string(tier.get("id")))
+                })
+        })
+        .or_else(|| nonempty_string(loaded.pointer("/currentTier/id")))
+        .unwrap_or("free-tier")
+}
+
+fn nonempty_string(value: Option<&Value>) -> Option<&str> {
+    value?.as_str().map(str::trim).filter(|id| !id.is_empty())
 }
 
 fn project_id(value: Option<&Value>) -> Option<&str> {
     let value = value?;
-    value
-        .as_str()
-        .or_else(|| value.get("id").and_then(Value::as_str))
-        .filter(|id| !id.trim().is_empty())
+    nonempty_string(Some(value)).or_else(|| nonempty_string(value.get("id")))
 }
 
 fn require_success(response: &reqwest::Response, operation: &str) -> Result<()> {
@@ -405,7 +616,7 @@ mod tests {
     #[derive(Clone)]
     struct MockState {
         requests: Arc<Mutex<Vec<Recorded>>>,
-        responses: Arc<Mutex<VecDeque<(StatusCode, Value)>>>,
+        responses: Arc<Mutex<VecDeque<(StatusCode, Body)>>>,
     }
     struct Mock {
         auth: AuthClient,
@@ -419,6 +630,16 @@ mod tests {
     }
     impl Mock {
         async fn start(responses: Vec<(StatusCode, Value)>) -> Self {
+            Self::start_bodies(
+                responses
+                    .into_iter()
+                    .map(|(status, value)| (status, Body::from(value.to_string())))
+                    .collect(),
+            )
+            .await
+        }
+
+        async fn start_bodies(responses: Vec<(StatusCode, Body)>) -> Self {
             let state = MockState {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 responses: Arc::new(Mutex::new(responses.into())),
@@ -432,10 +653,7 @@ mod tests {
                     body: to_bytes(body, 65536).await.unwrap().to_vec(),
                 });
                 let (status, body) = state.responses.lock().await.pop_front().unwrap();
-                Response::builder()
-                    .status(status)
-                    .body(Body::from(body.to_string()))
-                    .unwrap()
+                Response::builder().status(status).body(body).unwrap()
             }
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
@@ -495,7 +713,12 @@ mod tests {
 
     #[tokio::test]
     async fn login_exchanges_exact_form_requires_user_id_and_discovers_managed_project() {
-        for project in [json!("managed-project"), json!({"id": "managed-project"})] {
+        for project in [
+            json!("managed-project"),
+            json!({"id": "managed-project"}),
+            json!(" \tmanaged-project\n"),
+            json!({"id": " managed-project "}),
+        ] {
             let mock = Mock::start(vec![
                 tokens(),
                 (
@@ -534,7 +757,19 @@ mod tests {
             );
             assert_eq!(requests[2].path, "/v1internal:loadCodeAssist");
             let body: Value = serde_json::from_slice(&requests[2].body).unwrap();
-            assert_eq!(body, json!({"metadata": client_metadata(), "mode": 1}));
+            assert_eq!(requests[2].method, "POST");
+            assert_eq!(requests[2].headers["content-type"], "application/json");
+            assert_eq!(
+                requests[2].headers["authorization"],
+                "Bearer synthetic-google-access"
+            );
+            assert_eq!(
+                requests[2].headers["user-agent"],
+                "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)"
+            );
+            assert!(!requests[2].headers.contains_key("x-goog-api-client"));
+            assert!(!requests[2].headers.contains_key("client-metadata"));
+            assert_eq!(body, json!({"metadata": {"ideType": "ANTIGRAVITY"}}));
         }
     }
 
@@ -553,19 +788,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_login_onboarding_selects_default_then_first_then_free_tier() {
-        for (tiers, expected) in [
+    async fn explicit_login_onboarding_selects_default_then_first_then_current_then_free_tier() {
+        for (loaded, expected) in [
             (
-                json!([{"id": "first"}, {"id": "default", "isDefault": true}]),
+                json!({
+                    "allowedTiers": [{"id": "first"}, {"id": "default", "isDefault": true}],
+                    "currentTier": {"id": "current"}
+                }),
                 "default",
             ),
-            (json!([{"id": "first"}]), "first"),
-            (json!([]), "free-tier"),
+            (
+                json!({"allowedTiers": [{"id": "first"}], "currentTier": {"id": "current"}}),
+                "first",
+            ),
+            (
+                json!({"allowedTiers": [], "currentTier": {"id": "current"}}),
+                "current",
+            ),
+            (json!({}), "free-tier"),
+            (
+                json!({
+                    "allowedTiers": [{"isDefault": true}, {"id": "default", "isDefault": true}]
+                }),
+                "default",
+            ),
+            (
+                json!({
+                    "allowedTiers": [{"id": " "}, {"id": "not-first"}],
+                    "currentTier": {"id": " current "}
+                }),
+                "current",
+            ),
+            (
+                json!({"allowedTiers": [{"id": 42}], "currentTier": {"id": " "}}),
+                "free-tier",
+            ),
         ] {
             let mock = Mock::start(vec![
                 tokens(),
                 (StatusCode::OK, json!({"id": "stable-google-id"})),
-                (StatusCode::OK, json!({"allowedTiers": tiers})),
+                (StatusCode::OK, loaded),
                 (
                     StatusCode::OK,
                     json!({
@@ -584,34 +846,67 @@ mod tests {
             let requests = mock.state.requests.lock().await;
             assert_eq!(requests[3].path, "/v1internal:onboardUser");
             let body: Value = serde_json::from_slice(&requests[3].body).unwrap();
+            assert_eq!(requests[3].method, "POST");
+            assert_eq!(
+                requests[3].headers["authorization"],
+                "Bearer synthetic-google-access"
+            );
+            assert_eq!(requests[3].headers["content-type"], "application/json");
+            assert_eq!(requests[3].headers["accept"], "*/*");
+            assert_eq!(
+                requests[3].headers["user-agent"],
+                "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682) google-api-nodejs-client/10.3.0"
+            );
+            assert_eq!(requests[3].headers["x-goog-api-client"], "gl-node/22.21.1");
+            assert!(!requests[3].headers.contains_key("client-metadata"));
             assert_eq!(
                 body,
-                json!({"tierId": expected, "metadata": client_metadata()})
+                json!({
+                    "tier_id": expected,
+                    "metadata": {
+                        "ide_type": "ANTIGRAVITY",
+                        "ide_version": "2.24.0",
+                        "ide_name": "antigravity"
+                    }
+                })
             );
         }
     }
 
     #[tokio::test]
-    async fn onboarding_missing_project_fails_closed_without_hardcoded_fallback() {
-        let mock = Mock::start(vec![
+    async fn onboarding_missing_project_fails_closed_without_storing_incomplete_account() {
+        let mut replies = vec![
             tokens(),
             (StatusCode::OK, json!({"id": "stable-google-id"})),
             (StatusCode::OK, json!({})),
             (StatusCode::OK, json!({"done": true})),
-        ])
-        .await;
-        let error = mock
-            .auth
-            .agy_exchange_code("code", "verifier")
-            .await
-            .err()
-            .unwrap();
+        ];
+        replies.extend((0..PROJECT_RECHECKS).map(|_| (StatusCode::OK, json!({}))));
+        let mock = Mock::start(replies).await;
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::accounts::Store::open(directory.path()).unwrap();
+        let error = crate::application::account_commands::login_for(
+            store.clone(),
+            "agy".into(),
+            "synthetic".into(),
+            mock.auth.agy_exchange_code("code", "verifier"),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(
+            error.downcast_ref::<ProjectError>(),
+            Some(ProjectError::MissingProject)
+        ));
+        assert!(format!("{error:#}").contains("done=true project_field=absent"));
+        assert!(store.list().unwrap().accounts.is_empty());
+        let requests = mock.state.requests.lock().await;
+        assert_eq!(requests.len(), 4 + PROJECT_RECHECKS);
         assert!(
-            error
-                .to_string()
-                .contains("did not identify a managed project")
+            requests[4..]
+                .iter()
+                .all(|request| request.path == "/v1internal:loadCodeAssist")
         );
-        assert_eq!(mock.state.requests.lock().await.len(), 4);
     }
 
     #[tokio::test]
@@ -700,6 +995,325 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_secs(5));
         assert_eq!(credential.account_id, "provisioned");
         assert_eq!(mock.state.requests.lock().await.len(), 5);
+    }
+
+    #[test]
+    fn project_endpoint_and_timeout_contract_is_pinned() {
+        let endpoints =
+            AuthClient::agy_with_state_dir(Path::new("/unused-synthetic-state")).unwrap();
+        assert_eq!(
+            endpoints.agy_endpoints().unwrap().project,
+            "https://daily-cloudcode-pa.googleapis.com"
+        );
+        assert_eq!(ProjectOperation::Load.timeout(), Duration::from_secs(10));
+        assert_eq!(ProjectOperation::Onboard.timeout(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn project_parser_trims_strings_and_objects_and_rejects_empty_or_other_types() {
+        for value in [json!(" project "), json!({"id": "\tproject\n"})] {
+            assert_eq!(project_id(Some(&value)), Some("project"));
+        }
+        for value in [
+            Value::Null,
+            json!(""),
+            json!(" \t\n"),
+            json!({"id": " "}),
+            json!({}),
+            json!(42),
+            json!({"id": 42}),
+            json!([]),
+        ] {
+            assert_eq!(project_id(Some(&value)), None);
+        }
+        assert_eq!(project_id(None), None);
+    }
+
+    #[tokio::test]
+    async fn onboarding_accepts_trimmed_string_and_object_projects() {
+        for project in [json!(" provisioned "), json!({"id": "\tprovisioned\n"})] {
+            let mock = Mock::start(vec![
+                (StatusCode::OK, json!({})),
+                (
+                    StatusCode::OK,
+                    json!({"done": true, "response": {"cloudaicompanionProject": project}}),
+                ),
+            ])
+            .await;
+            assert_eq!(
+                mock.auth
+                    .agy_discover_project("synthetic-access")
+                    .await
+                    .unwrap(),
+                "provisioned"
+            );
+            assert_eq!(mock.state.requests.lock().await.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn done_without_usable_project_rechecks_discovery_without_restarting_onboarding() {
+        for project in [Value::Null, json!(" "), json!({"id": " "}), json!(42)] {
+            let mock = Mock::start(vec![
+                (StatusCode::OK, json!({})),
+                (
+                    StatusCode::OK,
+                    json!({"done": true, "response": {"cloudaicompanionProject": project}}),
+                ),
+                (
+                    StatusCode::OK,
+                    json!({"cloudaicompanionProject": {"id": " discovered "}}),
+                ),
+            ])
+            .await;
+            assert_eq!(
+                mock.auth
+                    .agy_discover_project("synthetic-access")
+                    .await
+                    .unwrap(),
+                "discovered"
+            );
+            let requests = mock.state.requests.lock().await;
+            assert_eq!(requests.len(), 3);
+            assert_eq!(requests[2].path, "/v1internal:loadCodeAssist");
+            assert_eq!(requests[2].body, requests[0].body);
+            assert_eq!(
+                requests[2].headers["user-agent"],
+                requests[0].headers["user-agent"]
+            );
+            assert!(!requests[2].headers.contains_key("x-goog-api-client"));
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_onboarding_allows_bounded_delayed_discovery_visibility() {
+        let mock = Mock::start(vec![
+            (StatusCode::OK, json!({})),
+            (StatusCode::OK, json!({"done": true})),
+            (StatusCode::OK, json!({})),
+            (StatusCode::OK, json!({})),
+            (
+                StatusCode::OK,
+                json!({"cloudaicompanionProject": "eventually-visible"}),
+            ),
+        ])
+        .await;
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            mock.auth
+                .agy_discover_project("synthetic-access")
+                .await
+                .unwrap(),
+            "eventually-visible"
+        );
+        assert!(start.elapsed() >= Duration::from_secs(10));
+        assert_eq!(mock.state.requests.lock().await.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn pending_onboarding_is_bounded_and_reports_distinct_timeout() {
+        let mut replies = vec![(StatusCode::OK, json!({}))];
+        replies.extend((0..ONBOARD_ATTEMPTS).map(|_| (StatusCode::OK, json!({"done": false}))));
+        let mock = Mock::start(replies).await;
+        let error = mock
+            .auth
+            .agy_discover_project("synthetic-access")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ProjectError>(),
+            Some(ProjectError::OnboardingTimeout)
+        ));
+        assert_eq!(mock.state.requests.lock().await.len(), 1 + ONBOARD_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn invalid_onboarding_responses_stop_without_replay_or_discovery_recheck() {
+        for (body, provider_error) in [
+            (Value::Null, false),
+            (json!([]), false),
+            (json!({"done": "true"}), false),
+            (
+                json!({"done": true, "error": {"message": "private-response-secret"}}),
+                true,
+            ),
+        ] {
+            let mock = Mock::start(vec![(StatusCode::OK, json!({})), (StatusCode::OK, body)]).await;
+            let error = mock
+                .auth
+                .agy_discover_project("synthetic-access")
+                .await
+                .unwrap_err();
+            if provider_error {
+                assert!(matches!(
+                    error.downcast_ref::<ProjectError>(),
+                    Some(ProjectError::Provider)
+                ));
+            } else {
+                assert!(matches!(
+                    error.downcast_ref::<ProjectError>(),
+                    Some(ProjectError::Malformed)
+                ));
+            }
+            assert!(!format!("{error:#}").contains("private-response-secret"));
+            assert_eq!(mock.state.requests.lock().await.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_json_and_oversized_responses_remain_distinct_from_missing_project() {
+        for operation in [ProjectOperation::Load, ProjectOperation::Onboard] {
+            for oversized in [false, true] {
+                let body = if oversized {
+                    "x".repeat(512 * 1024 + 1)
+                } else {
+                    "private-invalid-json".into()
+                };
+                let mock = Mock::start_bodies(vec![(StatusCode::OK, Body::from(body))]).await;
+                let error = mock
+                    .auth
+                    .agy_project_request("access-secret", operation, &json!({}), None)
+                    .await
+                    .err()
+                    .unwrap();
+                assert!(matches!(
+                    error.downcast_ref::<ProjectError>(),
+                    Some(ProjectError::Malformed | ProjectError::TooLarge)
+                ));
+                assert!(!format!("{error:#}").contains("private-invalid-json"));
+                assert_eq!(mock.state.requests.lock().await.len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_read_only_recheck_does_not_restart_onboarding() {
+        for (status, body) in [
+            (StatusCode::FORBIDDEN, json!({"error": "secret"})),
+            (StatusCode::OK, json!({"error": "secret"})),
+            (StatusCode::OK, Value::Null),
+        ] {
+            let mock = Mock::start(vec![
+                (StatusCode::OK, json!({})),
+                (StatusCode::OK, json!({"done": true})),
+                (status, body),
+            ])
+            .await;
+            let error = mock
+                .auth
+                .agy_discover_project("synthetic-access")
+                .await
+                .unwrap_err();
+            assert!(!matches!(
+                error.downcast_ref::<ProjectError>(),
+                Some(ProjectError::MissingProject)
+            ));
+            let requests = mock.state.requests.lock().await;
+            assert_eq!(requests.len(), 3);
+            assert_eq!(requests[2].path, "/v1internal:loadCodeAssist");
+        }
+    }
+
+    #[tokio::test]
+    async fn onboarding_transport_failure_never_replays_uncertain_dispatch() {
+        let broken_body = Body::from_stream(futures_util::stream::once(async {
+            Err::<Vec<u8>, _>(std::io::Error::other("private-network-secret"))
+        }));
+        let mock = Mock::start_bodies(vec![
+            (StatusCode::OK, Body::from("{}")),
+            (StatusCode::OK, broken_body),
+        ])
+        .await;
+        let error = mock
+            .auth
+            .agy_discover_project("access-secret")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ProjectError>(),
+            Some(ProjectError::Transport)
+        ));
+        assert!(!format!("{error:#}").contains("private-network-secret"));
+        assert_eq!(mock.state.requests.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_only_include_allowlisted_metadata_not_secrets_or_account_ids() {
+        let mock = Mock::start(vec![
+            (
+                StatusCode::OK,
+                json!({
+                    "allowedTiers": [{"id": "tier-secret", "isDefault": true}],
+                    "account": "account-secret"
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "done": true,
+                    "response": {"cloudaicompanionProject": {"id": "project-secret"}}
+                }),
+            ),
+            (
+                StatusCode::OK,
+                json!({"done": true, "error": "response-secret"}),
+            ),
+        ])
+        .await;
+        let (_, discovery) = mock
+            .auth
+            .agy_load_project("access-secret", None)
+            .await
+            .unwrap();
+        let (_, onboard) = mock
+            .auth
+            .agy_project_request(
+                "access-secret",
+                ProjectOperation::Onboard,
+                &json!({"tier_id": "tier-secret"}),
+                Some("tier-secret"),
+            )
+            .await
+            .unwrap();
+        let error = mock
+            .auth
+            .agy_project_request(
+                "access-secret",
+                ProjectOperation::Onboard,
+                &json!({"tier_id": "tier-secret"}),
+                Some("tier-secret"),
+            )
+            .await
+            .err()
+            .unwrap();
+        // This is the same Display payload used by both tracing and CLI errors.
+        // Test its exact bytes without relying on process-global tracing caches.
+        assert_eq!(
+            discovery.to_string(),
+            concat!(
+                "AGY operation=loadCodeAssist host=127.0.0.1 status=200 ",
+                "selected_tier=not-selected done=absent project_field=absent project_id_field=absent"
+            )
+        );
+        assert_eq!(
+            onboard.to_string(),
+            concat!(
+                "AGY operation=onboardUser host=127.0.0.1 status=200 ",
+                "selected_tier=other done=true project_field=object project_id_field=string"
+            )
+        );
+        assert_eq!(diagnostic_tier(Some("free-tier")), "free-tier");
+        assert_eq!(diagnostic_tier(Some("standard-tier")), "standard-tier");
+        let output = format!("{discovery}\n{onboard}\n{error:#}");
+        for secret in [
+            "tier-secret",
+            "account-secret",
+            "response-secret",
+            "project-secret",
+            "access-secret",
+        ] {
+            assert!(!output.contains(secret));
+        }
     }
 
     #[tokio::test]

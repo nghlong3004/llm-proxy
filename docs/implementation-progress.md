@@ -2,44 +2,43 @@
 
 ## State
 
-- Documentation is reorganized around a provider-neutral local LLM gateway for coding
-  agents. The root README is English; `docs/README.vi.md` is its Vietnamese overview.
-  Actual compatibility remains explicit: Anthropic Messages inbound, Codex/AGY
-  outbound, with Claude Code as a documented client example rather than universal support.
-- Dedicated English installation, updating and configuration guides retain native,
-  systemd and Docker setup; model/account/classifier configuration; quota-reset
-  uncertainty; private state; backup/rollback and current AGY limitations.
-  `docs/ubuntu-setup.md` remains a compatibility entry point linking to those guides.
-- Root README visibly includes Installation, Quick start, Configuration and Updating,
-  with links to the detailed guides. Security limits and MIT attribution are preserved.
-- Runtime implementation/config defaults/packaging are unchanged. AGY still lazily
-  resolves its OAuth client from a hash-pinned public reference and private cache;
-  explicit effort/structured output and other unsupported controls still fail closed.
-- GitHub About/description metadata has not been changed. No existing credentials,
+- AGY explicit-login project discovery/onboarding now follows the daily endpoint,
+  string metadata, tier order and endpoint-specific headers in
+  `NoeFabris/opencode-antigravity-auth` at
+  `821f824440b2b7c9ffe96bbdfad9d5cdead2f1de`. The reference fallback version/changelist
+  is pinned; no dynamic version lookup was added. Protocol details, assumptions and
+  deliberate differences are documented in `docs/antigravity.md`.
+- Completed onboarding without a usable project performs at most three read-only
+  discovery rechecks. No empty/hardcoded project is accepted. Only explicit login
+  onboards; inference/refresh and Codex behavior are unchanged. OAuth client acquisition,
+  PKCE, callback state validation, stable identity and credential publication remain intact.
+- Sanitized CLI/tracing diagnostics report operation, host, status, selected-tier
+  category, done state and project field types, never response values or identifiers.
+  Unknown tiers are redacted. Project errors distinguish transport, HTTP/provider,
+  malformed/oversized response, timeout and missing project.
+- Implementation and required local verification are complete. No existing credentials,
   installed binaries, services or authenticated provider integration were touched.
 
 ## Verification
 
 | Check | Result |
 | --- | --- |
-| Local Markdown links/anchors and balanced code fences | PASS: 55 local links/anchors across the documentation entry points |
-| Fenced configuration/command examples | PASS: 6 TOML, 1 JSON, 29 shell blocks parse; shell syntax only, no install/service/auth commands executed |
-| CLI integration regressions, locked/offline using default dependency cache | PASS: 23 tests (19 CLI + 4 AGY CLI) |
-| `cargo fmt --check` and diff whitespace checks | PASS |
-| Full Clippy/tests/release and Docker image/smoke | NOT RERUN: documentation-only change; prior runtime checkpoint passed 257 tests and release/Clippy checks |
-| Initial alternate dependency cache attempt | BLOCKED: `/tmp/llm-proxy-cargo` lacks index/dependencies; default offline cache succeeded |
-| Installation/update execution and authenticated live integration | NOT RUN: only documented, no services or real account operations changed |
-
-Guides were checked against the current CLI, config example, Compose file, image
-state layout and systemd unit. Code/config examples are illustrative; model IDs and
-local readiness do not prove provider access or entitlement. OAuth client values,
-account tokens and request payloads are not included in the documentation.
+| Focused synthetic AGY login tests, locked/offline | PASS: all 21 cases in the final full suite; diagnostics assert exact formatter bytes shared by tracing and CLI errors |
+| Concurrent fast AGY regressions | PASS: 30 repeated runs of 17 tests (510 executions); initial flaky tracing-capture test replaced by deterministic formatter assertions |
+| `cargo fmt --check` / diff whitespace | PASS |
+| `cargo clippy --all-targets --all-features --locked --offline -- -D warnings` | PASS |
+| `cargo test --locked --offline -- --include-ignored` | PASS: 268 synthetic/unit/integration tests, including ignored localhost contracts |
+| `cargo build --release --locked --offline` | PASS |
+| Local release CLI help | PASS: retry flags verified without authentication or state access |
+| Authenticated live AGY login/provisioning | NOT RUN: no authorization; passing mocks cannot establish that the reported account issue is resolved |
+| Docker image/smoke | NOT RUN: no Docker changes |
 
 ## Next
 
-- Review the rendered README and guides on GitHub; keep English/Vietnamese entry
-  points and command/configuration examples aligned with future behavior changes.
-- GitHub description suggestion: "A local LLM gateway for coding agents, with
-  model-based routing, native providers, and multi-account failover."
-- Binary installation, service changes and authenticated live tests remain separate
-  actions requiring authorization. Existing installed binaries keep their current behavior.
+- User can explicitly retry login using the local release build and the same state
+  directory/account name; exact commands are in `docs/antigravity.md`. No installed
+  binary or service replacement is part of this change.
+- Provider/account causes of completed onboarding without a project remain unconfirmed.
+  If retry fails, inspect only the sanitized error chain. Successful mocks do not
+  establish live managed-project provisioning; authenticated verification requires
+  separate authorization.
